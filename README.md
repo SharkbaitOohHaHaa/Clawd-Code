@@ -2,7 +2,7 @@
 
 **English** | [中文](#中文版) | [Français](docs/i18n/README_FR.md) | [Русский](docs/i18n/README_RU.md) | [हिन्दी](docs/i18n/README_HI.md) | [العربية](docs/i18n/README_AR.md) | [Português](docs/i18n/README_PT.md)
 
-# 🚀 Claude Code Python
+# 🚀 Clawd-Code
 
 **A Complete Python Reimplementation Based on Real Claude Code Source**
 
