@@ -604,7 +604,7 @@ class FailureTests(_Base):
             (http_response(200, b'{"vulns": [{"id": "A-1", "modified": "m", "score": NaN}]}'), "nan"),
             (http_response(200, b'{"vulns": [{"id": "A-1", "modified": "m", "id": "A-2"}]}'), "duplicate keys"),
             (http_response(200, b'{"vulns": [{"id": "A-1", "modified": "m", "x": '
-                           + b"[" * 5000 + b"]" * 5000 + b"}]}"), "deep nesting"),
+                           + b"[" * 100_000 + b"]" * 100_000 + b"}]}"), "deep nesting"),
             (http_response(200, b'{"vulns": [{"id": "A-1", "modified": "m", "summary": "\xff"}]}'), "invalid utf-8"),
             (http_response(200, "{}".encode("utf-16")), "utf-16"),
             (http_response(200, b'{"code": 5, "message": "x"}'), "error-shaped 200"),
