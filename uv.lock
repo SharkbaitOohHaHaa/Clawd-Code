@@ -364,6 +364,7 @@ dev = [
     { name = "mypy" },
     { name = "pytest" },
     { name = "ruff" },
+    { name = "tomli", marker = "python_full_version < '3.11'" },
     { name = "twine" },
 ]
 
@@ -373,6 +374,7 @@ dev = [
     { name = "mypy" },
     { name = "pytest" },
     { name = "ruff" },
+    { name = "tomli", marker = "python_full_version < '3.11'" },
     { name = "twine" },
 ]
 
@@ -389,6 +391,7 @@ requires-dist = [
     { name = "rich" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.16.8" },
     { name = "tiktoken", specifier = ">=0.7.0" },
+    { name = "tomli", marker = "python_full_version < '3.11' and extra == 'dev'", specifier = ">=2.0.1" },
     { name = "twine", marker = "extra == 'dev'", specifier = ">=5.0.0" },
     { name = "zhipuai" },
 ]
@@ -400,6 +403,7 @@ dev = [
     { name = "mypy", specifier = ">=2.3.1" },
     { name = "pytest", specifier = ">=8.0.0" },
     { name = "ruff", specifier = ">=0.16.8" },
+    { name = "tomli", marker = "python_full_version < '3.11'", specifier = ">=2.0.1" },
     { name = "twine", specifier = ">=5.0.0" },
 ]
 

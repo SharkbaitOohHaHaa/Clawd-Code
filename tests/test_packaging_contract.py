@@ -2,8 +2,12 @@ from __future__ import annotations
 
 import pathlib
 import re
-import tomllib
 import unittest
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10 compatibility
+    import tomli as tomllib
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -30,7 +34,8 @@ class PackagingContractTests(unittest.TestCase):
         project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         match = re.search(r"git clone (https://github\.com/[^\s]+)\.git", readme)
-        self.assertIsNotNone(match)
+        if match is None:
+            self.fail("README clone URL was not found")
         repository = match.group(1)
         self.assertEqual(project["project"]["urls"]["Homepage"], repository)
         self.assertEqual(project["project"]["urls"]["Repository"], repository)
@@ -99,7 +104,8 @@ class PackagingContractTests(unittest.TestCase):
             r"(?P<versions>(?:\s*-\s*[\"']?3\.\d+[\"']?\s*\n)+)",
             workflow,
         )
-        self.assertIsNotNone(matrix_match)
+        if matrix_match is None:
+            self.fail("CI Python version matrix was not found")
         matrix_versions = set(
             re.findall(r"3\.\d+", matrix_match.group("versions"))
         )
