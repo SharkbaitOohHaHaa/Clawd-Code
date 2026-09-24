@@ -14,9 +14,12 @@ except ModuleNotFoundError:  # pragma: no cover
                     "anthropic package is not installed. Install optional dependencies to use AnthropicProvider."
                 )
 
+        DefaultHttpxClient = Anthropic
+
     anthropic = _MissingAnthropic()
 
 from .base import BaseProvider, ChatResponse, MessageInput, TextChunkCallback
+from .sdk_policy import SDK_MAX_RETRIES, require_sdk_retry_policy
 
 
 class AnthropicProvider(BaseProvider):
@@ -34,7 +37,7 @@ class AnthropicProvider(BaseProvider):
         """
         super().__init__(api_key, base_url, model or "claude-sonnet-4-6")
 
-        self._client_kwargs = {"api_key": api_key}
+        self._client_kwargs: dict[str, Any] = {"api_key": api_key, "max_retries": SDK_MAX_RETRIES}
         if base_url:
             self._client_kwargs["base_url"] = base_url
         self.client = None
@@ -42,7 +45,13 @@ class AnthropicProvider(BaseProvider):
     def _ensure_client(self):
         if self.client is not None:
             return self.client
-        self.client = anthropic.Anthropic(**self._client_kwargs)
+        # One Clawd attempt = one SDK request: no SDK retries, and no redirects that could
+        # re-send the prompt and X-Api-Key to another host (httpx strips only Authorization).
+        client = anthropic.Anthropic(
+            **self._client_kwargs,
+            http_client=anthropic.DefaultHttpxClient(follow_redirects=False),
+        )
+        self.client = require_sdk_retry_policy(client)
         return self.client
 
     def _build_chat_response(self, response: Any) -> ChatResponse:

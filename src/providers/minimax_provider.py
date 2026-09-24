@@ -14,9 +14,12 @@ except ModuleNotFoundError:  # pragma: no cover
                     "anthropic package is not installed. Install optional dependencies to use MinimaxProvider."
                 )
 
+        DefaultHttpxClient = Anthropic
+
     anthropic = _MissingAnthropic()
 
 from .base import BaseProvider, ChatResponse, MessageInput, TextChunkCallback
+from .sdk_policy import SDK_MAX_RETRIES, require_sdk_retry_policy
 
 
 class MinimaxProvider(BaseProvider):
@@ -42,7 +45,7 @@ class MinimaxProvider(BaseProvider):
         resolved_base_url = base_url or self.DEFAULT_BASE_URL
         super().__init__(api_key, resolved_base_url, model or self.DEFAULT_MODEL)
 
-        self._client_kwargs: dict[str, Any] = {"api_key": api_key}
+        self._client_kwargs: dict[str, Any] = {"api_key": api_key, "max_retries": SDK_MAX_RETRIES}
         if resolved_base_url:
             self._client_kwargs["base_url"] = resolved_base_url
         self.client = None
@@ -50,7 +53,12 @@ class MinimaxProvider(BaseProvider):
     def _ensure_client(self):
         if self.client is not None:
             return self.client
-        self.client = anthropic.Anthropic(**self._client_kwargs)
+        # Same one-request contract as AnthropicProvider (no SDK retries, no redirects).
+        client = anthropic.Anthropic(
+            **self._client_kwargs,
+            http_client=anthropic.DefaultHttpxClient(follow_redirects=False),
+        )
+        self.client = require_sdk_retry_policy(client)
         return self.client
 
     def _build_chat_response(self, response: Any) -> ChatResponse:

@@ -344,6 +344,37 @@ class TestBuiltinCommands(unittest.TestCase):
         )
         self.assertIn("**Network/provider checks:** not run; doctor is local and read-only", result)
 
+    def test_doctor_shows_static_provider_sdk_policy_without_building_clients(self):
+        """/doctor states the SDK retry/redirect policy statically; no SDK client, no network."""
+        healthy = {
+            "manifest_schema_version": 1,
+            "tools": {"registered": [], "expected_registered": [], "metadata": {}, "issues": []},
+            "skills": {"audit_chain": {"valid": True, "entries": 1}, "records": {}, "issues": []},
+            "deferred_features": [],
+        }
+
+        with patch.dict(
+            os.environ,
+            {"HOME": str(self.workspace_root), "USERPROFILE": str(self.workspace_root)},
+            clear=False,
+        ), patch("src.capabilities.reconcile_capabilities", return_value=healthy), \
+             patch("socket.create_connection") as connect, patch("socket.getaddrinfo") as dns, \
+             patch("anthropic.Anthropic") as anthropic_sdk, \
+             patch("src.providers.openai_provider.OpenAI") as openai_sdk, \
+             patch("src.providers.glm_provider.ZhipuAI") as zhipu_sdk:
+            success, result, error = execute_command_sync("doctor", "", self.context)
+
+        for probe in (connect, dns, anthropic_sdk, openai_sdk, zhipu_sdk):
+            probe.assert_not_called()
+        self.assertTrue(success)
+        self.assertIn(
+            "**Provider SDK retries:** built-in providers (anthropic, minimax, openai, deepseek, qwen, "
+            "glm) build SDK clients with max_retries=0; redirect following disabled for the anthropic "
+            "and openai SDK families (the glm SDK does not follow redirects); plugin providers not "
+            "enforced; static, no provider call",
+            result,
+        )
+
     def test_doctor_reports_sanitized_observability_without_failing_on_history(self):
         healthy = {
             "manifest_schema_version": 1,

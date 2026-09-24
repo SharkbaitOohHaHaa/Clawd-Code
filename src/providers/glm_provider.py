@@ -10,6 +10,7 @@ except ModuleNotFoundError:  # pragma: no cover
     ZhipuAI = None
 
 from .openai_compatible import OpenAICompatibleProvider
+from .sdk_policy import SDK_MAX_RETRIES, require_sdk_retry_policy
 
 
 class GLMProvider(OpenAICompatibleProvider):
@@ -35,15 +36,18 @@ class GLMProvider(OpenAICompatibleProvider):
         )
 
     def _create_client(self) -> Any:
-        """Create Zhipu AI SDK client."""
+        """Create Zhipu AI SDK client (one request per attempt; the SDK default is 3 retries).
+
+        The zhipuai SDK builds its own httpx client without redirect following.
+        """
         if ZhipuAI is None:  # pragma: no cover
             raise ModuleNotFoundError(
                 "zhipuai package is not installed. Install optional dependencies to use GLMProvider."
             )
-        kwargs: dict[str, Any] = {"api_key": self.api_key}
+        kwargs: dict[str, Any] = {"api_key": self.api_key, "max_retries": SDK_MAX_RETRIES}
         if self.base_url:
             kwargs["base_url"] = self.base_url
-        return ZhipuAI(**kwargs)
+        return require_sdk_retry_policy(ZhipuAI(**kwargs))
 
     def get_available_models(self) -> list[str]:
         """Return current GLM model IDs used by Clawd."""

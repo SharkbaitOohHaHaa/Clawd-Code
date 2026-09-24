@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 
 from src.providers import PROVIDER_INFO, get_provider_class
 from src.providers.anthropic_provider import AnthropicProvider
@@ -13,6 +13,23 @@ from src.providers.glm_provider import GLMProvider
 from src.providers.minimax_provider import MinimaxProvider
 from src.providers.openai_provider import OpenAIProvider
 from src.providers.base import ChatMessage, ChatResponse
+
+# Real no-redirect HTTP clients are covered in test_provider_sdk_policy.py. Each one builds an
+# SSL context, which these constructor and parsing tests do not need.
+_HTTP_CLIENT_PATCHES = (
+    patch("src.providers.anthropic_provider.anthropic.DefaultHttpxClient"),
+    patch("src.providers.openai_provider.DefaultHttpxClient"),
+)
+
+
+def setUpModule():
+    for patcher in _HTTP_CLIENT_PATCHES:
+        patcher.start()
+
+
+def tearDownModule():
+    for patcher in _HTTP_CLIENT_PATCHES:
+        patcher.stop()
 
 
 class TestChatMessage(unittest.TestCase):
@@ -83,7 +100,7 @@ class TestAnthropicProvider(unittest.TestCase):
     def test_chat(self, mock_anthropic):
         """Test synchronous chat."""
         # Setup mock
-        mock_client = MagicMock()
+        mock_client = MagicMock(max_retries=0)
         mock_response = MagicMock()
         # Mock text block with type and text attributes
         mock_text_block = MagicMock()
@@ -108,7 +125,7 @@ class TestAnthropicProvider(unittest.TestCase):
     @patch("src.providers.anthropic_provider.anthropic.Anthropic")
     def test_chat_accepts_dict_messages(self, mock_anthropic):
         """Test synchronous chat with dict messages."""
-        mock_client = MagicMock()
+        mock_client = MagicMock(max_retries=0)
         mock_response = MagicMock()
         # Mock text block with type and text attributes
         mock_text_block = MagicMock()
@@ -134,7 +151,7 @@ class TestAnthropicProvider(unittest.TestCase):
     @patch("src.providers.anthropic_provider.anthropic.Anthropic")
     def test_chat_stream_response_with_tool_use(self, mock_anthropic):
         """Structured streaming returns final text and tool uses."""
-        mock_client = MagicMock()
+        mock_client = MagicMock(max_retries=0)
         mock_stream = MagicMock()
         mock_stream.__enter__.return_value = mock_stream
         mock_stream.__exit__.return_value = False
@@ -196,7 +213,7 @@ class TestOpenAIProvider(unittest.TestCase):
     def test_chat(self, mock_openai):
         """Test synchronous chat."""
         # Setup mock
-        mock_client = MagicMock()
+        mock_client = MagicMock(max_retries=0)
         mock_response = MagicMock()
         mock_response.choices = [MagicMock()]
         mock_response.choices[0].message.content = "Hello!"
@@ -220,7 +237,7 @@ class TestOpenAIProvider(unittest.TestCase):
     @patch("src.providers.openai_provider.OpenAI")
     def test_chat_accepts_dict_messages(self, mock_openai):
         """Test synchronous chat with dict messages."""
-        mock_client = MagicMock()
+        mock_client = MagicMock(max_retries=0)
         mock_response = MagicMock()
         mock_response.choices = [MagicMock()]
         mock_response.choices[0].message.content = "Hello!"
@@ -245,7 +262,7 @@ class TestOpenAIProvider(unittest.TestCase):
     @patch("src.providers.openai_provider.OpenAI")
     def test_chat_stream_response_rebuilds_tool_calls(self, mock_openai):
         """Streaming chunks are rebuilt into a final response with tool calls."""
-        mock_client = MagicMock()
+        mock_client = MagicMock(max_retries=0)
 
         chunk1 = MagicMock()
         chunk1.model = "gpt-4"
@@ -314,13 +331,15 @@ class TestDeepSeekProvider(unittest.TestCase):
             ["deepseek-flash", "deepseek-v4-pro"],
         )
 
-    @patch("src.providers.openai_provider.OpenAI")
+    @patch("src.providers.openai_provider.OpenAI", return_value=MagicMock(max_retries=0))
     def test_client_uses_deepseek_endpoint(self, mock_openai):
         provider = DeepSeekProvider(api_key="test_key")
         _ = provider.client
         mock_openai.assert_called_once_with(
             api_key="test_key",
             base_url="https://api.deepseek.com",
+            max_retries=0,
+            http_client=ANY,
         )
 
     def test_usage_includes_cache_and_reasoning_details(self):
@@ -377,16 +396,18 @@ class TestQwenProvider(unittest.TestCase):
             ],
         )
 
-    @patch("src.providers.openai_provider.OpenAI")
+    @patch("src.providers.openai_provider.OpenAI", return_value=MagicMock(max_retries=0))
     def test_client_uses_singapore_endpoint(self, mock_openai):
         provider = QwenProvider(api_key="test_key")
         _ = provider.client
         mock_openai.assert_called_once_with(
             api_key="test_key",
             base_url="https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+            max_retries=0,
+            http_client=ANY,
         )
 
-    @patch("src.providers.openai_provider.OpenAI")
+    @patch("src.providers.openai_provider.OpenAI", return_value=MagicMock(max_retries=0))
     def test_client_can_disable_sdk_retries_for_media_path(self, mock_openai):
         provider = QwenProvider(api_key="test_key", max_retries=0)
         _ = provider.client
@@ -394,6 +415,7 @@ class TestQwenProvider(unittest.TestCase):
             api_key="test_key",
             base_url="https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
             max_retries=0,
+            http_client=ANY,
         )
 
 
@@ -427,7 +449,7 @@ class TestGLMProvider(unittest.TestCase):
             ["glm-5.2", "glm-5-turbo", "glm-5", "glm-4.7", "glm-4.6"],
         )
 
-    @patch("src.providers.glm_provider.ZhipuAI")
+    @patch("src.providers.glm_provider.ZhipuAI", return_value=MagicMock(max_retries=0))
     def test_client_honors_configured_endpoint(self, mock_zhipu):
         provider = GLMProvider(
             api_key="test_key",
@@ -437,13 +459,14 @@ class TestGLMProvider(unittest.TestCase):
         mock_zhipu.assert_called_once_with(
             api_key="test_key",
             base_url="https://example.test/v4",
+            max_retries=0,
         )
 
     @patch("src.providers.glm_provider.ZhipuAI")
     def test_chat(self, mock_zhipu):
         """Test synchronous chat."""
         # Setup mock
-        mock_client = MagicMock()
+        mock_client = MagicMock(max_retries=0)
         mock_response = MagicMock()
         mock_response.choices = [MagicMock()]
         mock_response.choices[0].message.content = "Hello!"
@@ -469,7 +492,7 @@ class TestGLMProvider(unittest.TestCase):
     def test_chat_with_reasoning(self, mock_zhipu):
         """Test chat with reasoning content."""
         # Setup mock
-        mock_client = MagicMock()
+        mock_client = MagicMock(max_retries=0)
         mock_response = MagicMock()
         mock_response.choices = [MagicMock()]
         mock_response.choices[0].message.content = "Answer"
@@ -519,13 +542,15 @@ class TestMinimaxProvider(unittest.TestCase):
         self.assertIn("MiniMax-M2.7-highspeed", models)
         self.assertIn("MiniMax-M2.5", models)
 
-    @patch("src.providers.minimax_provider.anthropic.Anthropic")
+    @patch("src.providers.minimax_provider.anthropic.Anthropic", return_value=MagicMock(max_retries=0))
     def test_client_uses_minimax_endpoint(self, mock_anthropic):
         provider = MinimaxProvider(api_key="test_key")
         _ = provider._ensure_client()
         mock_anthropic.assert_called_once_with(
             api_key="test_key",
             base_url="https://api.minimaxi.com/anthropic",
+            max_retries=0,
+            http_client=ANY,
         )
 
 

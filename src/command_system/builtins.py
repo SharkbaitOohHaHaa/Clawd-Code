@@ -31,6 +31,7 @@ from ..history import HistoryLog
 from ..observability import runtime_observability_snapshot
 from ..osv_evidence import osv_contract_status
 from ..providers.base import BaseProvider
+from ..providers.sdk_policy import provider_sdk_policy_status
 from ..usage_ledger import month_to_date_provider_usage
 from .engine import CommandContext, CommandResult, LocalCommandResult
 from .registry import CommandRegistry, get_command_registry, list_commands
@@ -900,6 +901,7 @@ def doctor_command_call(args: str, context: CommandContext) -> LocalCommandResul
         ),
         f"**Deferred capabilities:** {', '.join(deferred) if deferred else 'none'}",
         f"**Software evidence (OSV):** {osv_contract_status()}",
+        f"**Provider SDK retries:** {provider_sdk_policy_status()}",
         "**Network/provider checks:** not run; doctor is local and read-only",
     ]
 

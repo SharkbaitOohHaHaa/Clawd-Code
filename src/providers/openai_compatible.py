@@ -68,6 +68,9 @@ class OpenAICompatibleProvider(BaseProvider):
     def _create_client(self) -> Any:
         """Create the provider-specific SDK client.
 
+        Built-in subclasses must construct it with ``max_retries=0`` and pass it through
+        ``require_sdk_retry_policy`` (see ``sdk_policy``); they create it lazily, here.
+
         Returns:
             An instance of the provider's SDK client.
         """
