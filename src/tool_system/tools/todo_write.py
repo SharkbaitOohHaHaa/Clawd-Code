@@ -12,6 +12,7 @@ class TodoWriteTool:
     def spec(self) -> ToolSpec:
         return ToolSpec(
             name="TodoWrite",
+            permission_policy="allow",
             description="Update the current todo list for this session.",
             input_schema={
                 "type": "object",
@@ -36,7 +37,7 @@ class TodoWriteTool:
                 },
                 "required": ["todos"],
             },
-            is_read_only=True,
+            is_read_only=False,
             max_result_size_chars=100_000,
             strict=True,
         )

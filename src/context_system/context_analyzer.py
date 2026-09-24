@@ -29,11 +29,19 @@ MODEL_CONTEXT_WINDOWS: dict[str, int] = {
     "gpt-4o-mini": 128_000,
     "gpt-4-turbo": 128_000,
     "gpt-4": 128_000,
-    # GLM / Minimax defaults
-    "glm-4": 128_000,
-    "glm-4-flash": 128_000,
-    "minimax": 128_000,
-    "abab": 128_000,
+    # Built-in Chinese provider families. Use conservative supported windows
+    # where vendor limits are slightly above a round-number budget.
+    "qwen3.8": 1_000_000,
+    "qwen3.7": 1_000_000,
+    "qwen3-coder": 1_000_000,
+    "deepseek-flash": 1_000_000,
+    "deepseek-v4-pro": 1_000_000,
+    "glm-5": 200_000,
+    "glm-4.7": 200_000,
+    "glm-4.6": 200_000,
+    "minimax-m3": 1_000_000,
+    "minimax-m2.7": 1_000_000,
+    "minimax-m2.5": 1_000_000,
 }
 
 DEFAULT_CONTEXT_WINDOW = 200_000

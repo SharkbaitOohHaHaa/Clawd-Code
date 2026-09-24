@@ -3,12 +3,22 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from datetime import datetime
 from typing import Optional
 from dataclasses import dataclass, field
 
 from .conversation import Conversation
+
+
+_SESSION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+
+
+def _validate_session_id(session_id: str) -> str:
+    if session_id in {".", ".."} or not _SESSION_ID_RE.fullmatch(session_id):
+        raise ValueError("invalid session id")
+    return session_id
 
 
 @dataclass
@@ -45,6 +55,7 @@ class Session:
     @classmethod
     def load(cls, session_id: str) -> Optional['Session']:
         """Load session from disk."""
+        session_id = _validate_session_id(session_id)
         session_file = Path.home() / ".clawd" / "sessions" / f"{session_id}.json"
 
         if not session_file.exists():
@@ -61,6 +72,40 @@ class Session:
             created_at=data["created_at"],
             updated_at=data["updated_at"]
         )
+
+    @classmethod
+    def list_saved(cls, limit: int = 20) -> list['Session']:
+        """List recent valid saved sessions, newest first."""
+        if limit <= 0:
+            return []
+
+        session_dir = Path.home() / ".clawd" / "sessions"
+        if not session_dir.exists() or not session_dir.is_dir():
+            return []
+
+        sessions: list[Session] = []
+        for session_file in session_dir.glob("*.json"):
+            if session_file.is_symlink() or not session_file.is_file():
+                continue
+            try:
+                session_id = _validate_session_id(session_file.stem)
+                session = cls.load(session_id)
+            except (OSError, ValueError, json.JSONDecodeError, KeyError, TypeError):
+                continue
+            if session is not None:
+                sessions.append(session)
+
+        def sort_key(session: Session) -> datetime:
+            try:
+                return datetime.fromisoformat(session.updated_at)
+            except (TypeError, ValueError):
+                try:
+                    return datetime.fromisoformat(session.created_at)
+                except (TypeError, ValueError):
+                    return datetime.min
+
+        sessions.sort(key=sort_key, reverse=True)
+        return sessions[:limit]
 
     @classmethod
     def create(cls, provider: str, model: str) -> 'Session':

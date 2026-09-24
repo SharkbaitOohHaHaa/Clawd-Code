@@ -15,12 +15,23 @@
 | ⏳ 规划中 | 已明确方向，欢迎提交 PR |
 | 🚫 未开始 | 当前尚无实现 |
 
+权威运行时能力状态定义在 `src/capability_manifest.json`，并由确定性 reconciler 与实际 registry / 文件系统 / skill trust 状态比较。
+
+<!-- CAPABILITY-MANIFEST:START -->
+| Capability state | Tools | Features |
+|---|---|---|
+| Active / supported | AskUserQuestion, CronCreate, CronDelete, CronList, DataInspect, DataTransform, Edit, EnterPlanMode, EnterWorktree, ExitPlanMode, ExitWorktree, Glob, Grep, LSP, ListMcpResourcesTool, ListMcpToolsTool, MCP, NotebookEdit, Read, ReadMcpResourceTool, Skill, Sleep, StructuredOutput, TaskCreate, TaskGet, TaskList, TaskOutput, TaskStop, TaskUpdate, TodoWrite, ToolSearch, WebFetch, WebSearch, Write | agent_loop, authentication_recovery, capability_manifest, capability_reconciler, chinese_provider_ecosystem, context_engine, custom_commands_tools, data_engineering_runtime, developer_quality_tooling, enterprise_workflow_extensions, full_registered_tool_schema, git_worktree_runtime, lsp_runtime, mcp_resource_runtime, mcp_runtime, permission_contract, permission_policy_configuration, project_setup_advisor, provider_extensions, python_plugin_runtime, sanitized_runtime_instrumentation, sensitive_path_policy, skill_trust_runtime |
+| Clawd-specific | Agent, BriefPreview, GeminiThink, Memory, QwenMediaAnalyze, SendMessage, SendUserMessage, TeamCreate, TeamDelete, YouTubeAnalyze |  |
+| Intentionally disabled | Bash, Config | hook_runtime |
+| Deferred / not production-ready |  | subagent_runtime |
+<!-- CAPABILITY-MANIFEST:END -->
+
 ---
 
 ## 项目亮点
 
 - **Python 重构版**：不是单纯 UI 模仿，而是按 Claude Code 的架构思路重建。
-- **多模型先行**：当前已支持 Anthropic、OpenAI、GLM 三类 Provider。
+- **多模型先行**：当前已支持 Anthropic、OpenAI、DeepSeek、Qwen、GLM、MiniMax 六类 Provider。
 - **CLI / REPL 可用**：已经具备基础交互能力，适合持续迭代。
 - **工具系统框架完整**：已实现 30+ 工具模块、Agent Loop、权限系统框架。
 - **更适合社区共建**：Python 生态更易二开，适合工具、自动化、数据工程场景扩展。
@@ -34,20 +45,20 @@
 |------|------|----------|
 | CLI 启动入口 | ✅ | 已支持 `clawd`、`login`、`config`、`--version` |
 | 交互式 REPL | ✅ | 支持交互式输出、历史记录、Tab 补全、多行输入 |
-| Slash Commands | ✅ | 已支持 `/help`、`/clear`、`/save`、`/load`、`/multiline`、`/exit` |
-| 多 Provider 抽象 | ✅ | 已支持 Anthropic / OpenAI / GLM |
+| Slash Commands | ✅ | canonical palette 包含 `/help`、`/clear-chat`、`/save-session`、`/load-session`、`/compact-context`、`/context-usage`、`/usage`、`/session-usage`、`/list-tools`、`/run-tool`、`/list-skills`、`/setup-project`、`/exit` 等；旧短名称保留为兼容别名 |
+| 多 Provider 抽象 | ✅ | 已支持 Anthropic / OpenAI / DeepSeek / Qwen / GLM / MiniMax |
 | Provider 配置管理 | ✅ | 支持默认 Provider、Base URL、默认模型配置 |
 | 会话持久化 | ✅ | 支持保存/加载本地会话 |
 | 会话消息管理 | ✅ | 支持会话历史维护与序列化 |
-| 错误恢复 / 重新登录 | 🟡 | 已有基础认证错误处理与重新配置流程 |
-| Token / Cost 跟踪 | 🚫 | 当前聊天 CLI 尚未形成完整统计视图 |
-| 上下文构建 | 🟡 | 已有 `context_system` 基础版，支持 workspace / git / `CLAUDE.md` 注入，仍缺 README 摘要、memory、compact |
+| 错误恢复 / 重新登录 | ✅ | REPL 识别 401 / provider auth failures，避免 direct fast path 重复请求；可显式重新配置 provider，并同步 session / command context；失败请求不会自动重试 |
+| Token / Cost 跟踪 | ✅ | `/usage` 提供 API/model usage 与本地 skill/tool activity；`/session-usage` 提供当前 JR session 跟踪的 token usage |
+| 上下文构建 | ✅ | 已支持 bounded workspace/project map、git、`CLAUDE.md`、README / 入口文件概览、持久 memory 与 compact；repo map 不跟随 symlink 且有硬预算 |
 | Claude Code Agent Loop | ✅ | 已实现 agent_loop.py，支持工具调用循环 |
-| `/resume` 会话恢复体验 | 🚫 | 暂无独立恢复流程与 UI |
-| `/compact` 对话压缩 | 🚫 | 暂无自动/手动压缩能力 |
-| `/doctor` 诊断系统 | 🚫 | 暂无环境、配置、权限、依赖诊断命令 |
-| Hook 系统 | 🚫 | 暂无 pre/post tool use hooks |
-| 权限系统 | 🟡 | 已有 permissions.py 框架，尚未完全集成 |
+| `/resume` 会话恢复体验 | ✅ | 已实现最近保存会话选择器与 `/resume <session-id>` 直接恢复；保持当前 provider 路由 |
+| `/compact` 对话压缩 | ✅ | 已提供 canonical `/compact-context`，并保留 `/compact` 兼容别名 |
+| `/doctor` 健康诊断 | ✅ | 已实现本地只读 capability / trust / runtime health check；不自动修复，不调用 provider / network |
+| Hook 系统 | 🚫 | Generic user-defined hook runtime intentionally disabled; security/lifecycle policy stays in dedicated fail-closed chokepoints |
+| 权限系统 | ✅ | 已集成 fail-closed tool permission contract、敏感路径保护，以及 operator/project 权限策略；project policy 只能收紧 operator 已授予的权限 |
 
 ---
 
@@ -64,7 +75,7 @@
 | Schema Validation | ✅ | 已实现参数校验系统 |
 | Agent Loop | ✅ | 已实现完整的工具调用循环 |
 | Tool Context | ✅ | 已实现工具上下文管理 |
-| Permission Framework | 🟡 | 已有权限检查框架，待完善集成 |
+| Permission Framework | ✅ | registered tools 强制显式 permission policy；已启用敏感路径保护与 operator/project policy loader，repo policy 只能减权 |
 | Error Handling | ✅ | 已定义工具错误类型与处理 |
 | Task Manager | ✅ | 已实现任务管理器 |
 
@@ -77,7 +88,7 @@
 | 文件操作 | FileEditTool | `edit.py` | ✅ 已实现 |
 | 文件操作 | GlobTool | `glob.py` | ✅ 已实现 |
 | 文件操作 | GrepTool | `grep.py` | ✅ 已实现 |
-| 系统操作 | BashTool | `bash.py` | ✅ 已实现 |
+| 系统操作 | BashTool | `bash.py` | ✅ 已实现；安全策略明确禁止默认注册 |
 | 网络工具 | WebFetchTool | `web_fetch.py` | ✅ 已实现 |
 | 网络工具 | WebSearchTool | `web_search.py` | ✅ 已实现 |
 | 交互工具 | AskUserQuestionTool | `ask_user_question.py` | ✅ 已实现 |
@@ -86,18 +97,18 @@
 | 任务管理 | TaskStopTool | `task_stop.py` | ✅ 已实现 |
 | 任务管理 | TasksV2Tool | `tasks_v2.py` | ✅ 已实现 |
 | 任务管理 | TaskManager | `task_manager.py` | ✅ 已实现 |
-| Agent 工具 | AgentTool | `agent.py` | ✅ 已实现 |
+| Agent 工具 | AgentTool | `agent.py` | ✅ Clawd-specific 本地顺序工具编排；不是隔离的 subagent runtime |
 | Agent 工具 | BriefTool | `brief.py` | ✅ 已实现 |
 | Agent 工具 | TeamTool | `team.py` | ✅ 已实现 |
-| 配置工具 | ConfigTool | `config.py` | ✅ 已实现 |
+| 配置工具 | ConfigTool | `config.py` | ✅ 类已实现；安全策略明确禁止默认注册 |
 | 计划模式 | PlanModeTool | `plan_mode.py` | ✅ 已实现 |
 | 定时任务 | CronTool | `cron.py` | ✅ 已实现 |
-| MCP 工具 | MCPTool | `mcp.py` | ✅ 已实现 |
-| MCP 工具 | MCPResourcesTool | `mcp_resources.py` | ✅ 已实现 |
+| MCP 工具 | MCPTool | `mcp.py` + `mcp_resource_runtime.py` | ✅ 本地 stdio tool execution 已启用；operator allowlist、固定 contract SHA-256、fresh `tools/list`、输入 schema 校验；写入/open-world 调用必须显式确认 |
+| MCP 工具 | MCPResourcesTool | `mcp_resources.py` + `mcp_resource_runtime.py` | ✅ 只读资源 runtime 已实现；隔离 `mcp==2.2.0`、本地 stdio、operator manifest、先 list 后 read、默认注册 |
 | 技能系统 | SkillTool | `skill.py` | ✅ 已实现 |
 | 工具搜索 | ToolSearchTool | `tool_search.py` | ✅ 已实现 |
-| LSP 集成 | LSPTool | `lsp.py` | ✅ 已实现 |
-| Worktree | WorktreeTool | `worktree.py` | ✅ 已实现 |
+| LSP 集成 | LSPTool | `lsp.py` + `pyright_lsp.py` | ✅ 已实现；固定 Pyright 1.1.414，本地 stdio，workspace 限定，只读操作，默认注册 |
+| Worktree | WorktreeTool | `worktree.py` | ✅ 真实 Git linked worktree；`clawd/<name>` 分支、`.git/clawd-worktrees/<name>`、显式确认进入、退出保留 worktree/branch |
 | 杂项工具 | SleepTool | `sleep.py` | ✅ 已实现 |
 | 杂项工具 | StructuredOutputTool | `structured_output.py` | ✅ 已实现 |
 | 杂项工具 | MiscTools | `misc.py` | ✅ 已实现 |
@@ -114,11 +125,11 @@
 | Tool Execution Engine | ✅ | 已实现工具加载、执行、结果回填闭环 |
 | Output Styles | ✅ | 已实现输出样式加载系统 |
 | Session Persistence | ✅ | 已有会话保存/加载能力 |
-| Context Engine | 🟡 | 已接入基础上下文构建链路，支持 workspace、git、`CLAUDE.md` prompt 注入 |
-| Permission Engine | 🟡 | 已有框架，未完全集成到工具执行流程 |
-| Compaction Engine | 🚫 | 未形成对话压缩与 token 管理能力 |
-| Hook Runtime | 🚫 | 未接入设置驱动的 hook 执行机制 |
-| MCP Runtime | 🟡 | 已有 MCP 工具，未形成完整 MCP 协议层 |
+| Context Engine | ✅ | Agent Loop 已接入 bounded project map + workspace/git/README/entry/`CLAUDE.md`/memory 上下文；map workspace-bound、names-only、预算受限 |
+| Permission Engine | ✅ | ToolRegistry fail-closed 强制显式 permission policy；REPL 启动加载 trusted operator grants 与 repo-only restrictions，非法或扩权策略拒绝启动 |
+| Compaction Engine | ✅ | 已支持手动 context compaction，并记录 compact task usage |
+| Hook Runtime | 🚫 | Intentionally disabled; no settings-driven shell/HTTP/MCP/prompt/agent hook execution is exposed |
+| MCP Runtime | ✅ | 本地 stdio resources + guarded tool execution 已启用；远程 HTTP、未授权/未固定 contract 的 tools 仍不开放 |
 
 ---
 
@@ -171,73 +182,67 @@
 - [x] 工具 schema、参数校验、异常处理、调用日志
 - [x] 工具执行结果回填闭环
 
-## Phase 3：上下文、权限、恢复能力 (进行中)
+## Phase 3：上下文、权限、恢复能力 (已完成)
 
 目标：补齐 Claude Code 的工程化能力。
 
-- [ ] 工作区上下文构建完善
+- [x] 工作区上下文构建完善
 - [x] git status / 文件树 / `CLAUDE.md` 注入基础版
-- [ ] README / 入口文件摘要注入
-- [ ] memory 与历史上下文管理
-- [ ] 权限系统完全集成
-- [ ] `/resume`
-- [ ] `/compact`
-- [ ] `/doctor`
-- [ ] pre/post tool use hooks
+- [x] README / 入口文件摘要注入
+- [x] memory 与历史上下文管理
+- [x] 权限系统完全集成
+- [x] `/resume`
+- [x] `/compact`
+- [x] `/doctor`
+- [x] Generic pre/post hook runtime intentionally excluded; tool permissions, sensitive paths, and instrumentation remain in dedicated chokepoints
 
 ## Phase 4：MCP、插件、扩展生态
 
 目标：把项目从单体 CLI 升级为可扩展平台。
 
-- [ ] MCP client/runtime 完善
-- [ ] Python 插件系统
-- [ ] 自定义 commands / tools / hooks
-- [ ] 本地模型与第三方 provider 扩展
-- [ ] 更完善的 observability 与调试工具
+- [x] MCP 只读 resource client/runtime（本地 stdio、operator manifest、advertised-URI gate）
+- [x] MCP 本地 stdio tool execution 与逐 server/tool 信任/权限契约（operator policy、contract pin、fresh discovery、explicit approval）
+- [x] Python 插件系统（manifest-only discovery + exact-hash operator activation；discovery 不执行 Python）
+- [x] 自定义 commands / tools（exact-hash active plugins register collision-checked commands and permission-enforced tools；generic executable hooks remain excluded）
+- [x] 本地模型与第三方 provider 扩展（exact-hash trusted plugin providers；remote providers require credentials；credentialless providers are local-only loopback/localhost）
+- [x] 更完善的 observability 与调试工具（sanitized ledgers + /doctor runtime snapshot + recent error diagnostics；observability failures do not break runtime）
 
 ## Phase 5：Python 版本的差异化亮点
 
 目标：做出属于 Python 重构版的特色。
 
-- [ ] Notebook 友好工具链
-- [ ] 数据工程 / ETL 场景增强
-- [ ] 中国模型生态一等公民支持
-- [ ] pytest / ruff / mypy / uv 集成体验
-- [ ] 面向企业内自动化与工作流的扩展接口
+- [x] Notebook 友好工具链（Read + NotebookEdit 结构化 replace / insert / delete；read-before-write；不执行 notebook 代码）
+- [x] 数据工程 / ETL 场景增强（DataInspect + DataTransform；CSV / TSV / JSON / JSONL；bounded schema/preview + exact-match filter/project/load；不覆盖现有输出）
+- [x] 中国模型生态一等公民支持（DeepSeek / Qwen / GLM / MiniMax 内置 provider；独立默认模型 / endpoint / env key；CLI / REPL 一等选择）
+- [x] pytest / ruff / mypy / uv 集成体验（Python 3.12 dev pin；uv sync --locked；uv run pytest / ruff / mypy；Ruff correctness baseline；Mypy gradual typed baseline）
+- [x] 面向企业内自动化与工作流的扩展接口（exact-hash plugin WORKFLOWS；声明式 PromptCommand；显式非空 tool allowlist；复用现有权限/agent loop；无通用 hook 后台执行）
 
 ---
 
-## 我们期待的 PR
+## Phase 0–5 完成后的真实待办
 
-### P0：最欢迎、最容易合并
+当前定义的 Phase 0–5 路线图已经完成，但这不等于所有可能的 Claude Code 能力都已实现。权威状态仍以 `src/capability_manifest.json` 和 `/doctor` 为准。
 
-- 测试覆盖增强
-- 文档完善
-- 错误处理改进
-- 性能优化
+### P0：发布与持续验证
 
-### P1：高价值基础能力
+已落地 GitHub Actions CI：Python 3.10 / 3.11 / 3.12 矩阵运行 capability contract、完整 pytest、Ruff 与 Mypy；通过后使用 Python 3.12 构建 wheel/sdist 并执行 `twine check`。Workflow 只读 repository content、actions 使用 commit SHA 固定，不包含 secrets、publish 或 deployment 步骤。
 
-- 上下文自动构建
-- 权限系统完全集成
-- `/resume` 实现
-- `/compact` 实现
-- `/doctor` 实现
+- 在允许联网的干净环境中验证完整依赖安装和 wheel/sdist 安装矩阵；本次离线审计无法为全新 venv 下载未缓存的 `tiktoken`。
+- 在未来 setuptools 强制截止日期前迁移弃用的 license metadata；当前构建可通过，但会产生 deprecation warning。
+- 持续维护 CHANGELOG、release notes、安装文档与实际测试数量/能力状态。
 
-### P2：Claude Code 关键体验补齐
+### P1：明确 deferred / intentionally disabled 的能力
 
-- Hook 系统
-- MCP 完善支持
-- Token/Cost 统计
-- 性能监控与调优
+- `subagent_runtime`：**DEFERRED_NOT_PRODUCTION_READY**。只有在具备隔离 child LLM loop、独立 context/session/worker、权限与取消边界后才应提升状态。
+- Generic `hook_runtime`：**INTENTIONALLY_DISABLED**，不是遗漏项。仅在出现具体、批准的 use case，并能保持 fail-closed 安全边界时重新评估。
+- `Bash` / model-driven `Config`：默认 hardened registry 中继续 intentionally disabled；不要为了“功能数量”自动开启。
 
-### P3：Python 版亮点方向
+### P2：持续增强方向
 
-- Notebook 编辑与读取增强
-- 数据文件工具增强
-- pytest / ruff / mypy / uv 集成
-- 更多国内外模型 provider
-- 可插拔工具系统
+- Provider 兼容性、模型目录和流式行为增强。
+- 性能基准、内存/上下文成本测量与回归监控。
+- MCP / plugin / workflow 示例、文档与兼容性测试。
+- 更多测试覆盖、错误处理和安全回归案例。
 
 ---
 
@@ -250,7 +255,7 @@
 | Context | repo map、git status、项目文档注入、memory |
 | Permissions | 权限集成、安全策略、命令限制 |
 | Providers | 新 provider、模型选型、流式兼容 |
-| MCP / Plugins | MCP runtime 完善、插件装载、自定义工具扩展 |
+| MCP / Plugins | MCP / plugin / workflow 文档、兼容性测试、新扩展示例 |
 | Quality | 测试、基准、文档、安装流程、CI |
 | Performance | 性能优化、内存管理、并发处理 |
 
@@ -270,10 +275,10 @@
 
 可以这样介绍项目：
 
-> Claude Code Python 是一个基于真实 Claude Code 源码结构的 Python 重构版。当前已经具备多 Provider 聊天 CLI、完整工具系统框架（30+ 工具）与 Agent Loop，已实现工具调用闭环，正在完善上下文构建、权限系统、会话恢复、压缩、MCP 与插件体系。欢迎围绕工具增强、runtime、permissions、context 与 Python 原生扩展能力提交 PR。
+> Claude Code Python 是一个基于真实 Claude Code 源码结构的 Python 重构版。当前已经具备多 Provider 聊天 CLI、完整工具系统框架（30+ 工具）与 Agent Loop，已实现工具调用闭环、bounded 项目上下文、权限策略、会话恢复、压缩、MCP 与插件体系。欢迎围绕工具增强、runtime、permissions、context 与 Python 原生扩展能力提交 PR。
 
 ---
 
 ## 一句话总结
 
-**当前我们已经有一个具备完整工具系统框架和 Agent Loop 的 Python Agent Runtime；接下来要做的是，完善上下文构建、权限集成、恢复能力，把它真正推进成具备 Claude Code 完整体验的 Python Agent 平台。**
+**当前我们已经有一个具备完整工具系统框架、Agent Loop、bounded 项目上下文、权限策略、认证恢复与会话恢复能力的 Python Agent Runtime；Phase 0–5 的当前路线图条目均已有实现与验证证据，但 capability manifest 仍明确保留 `subagent_runtime` 为 deferred、`hook_runtime` 为 intentionally disabled。**

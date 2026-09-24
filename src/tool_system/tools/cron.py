@@ -13,6 +13,7 @@ class CronCreateTool:
     def spec(self) -> ToolSpec:
         return ToolSpec(
             name="CronCreate",
+            permission_policy="allow",
             description="Schedule a recurring or one-shot prompt (in-memory).",
             input_schema={
                 "type": "object",
@@ -25,7 +26,7 @@ class CronCreateTool:
                 },
                 "required": ["cron", "prompt"],
             },
-            is_read_only=True,
+            is_read_only=False,
             max_result_size_chars=100_000,
             strict=True,
         )
@@ -57,6 +58,7 @@ class CronListTool:
     def spec(self) -> ToolSpec:
         return ToolSpec(
             name="CronList",
+            permission_policy="allow",
             description="List scheduled cron jobs.",
             input_schema={"type": "object", "additionalProperties": False, "properties": {}},
             is_read_only=True,
@@ -74,6 +76,7 @@ class CronDeleteTool:
     def spec(self) -> ToolSpec:
         return ToolSpec(
             name="CronDelete",
+            permission_policy="allow",
             description="Delete a scheduled cron job.",
             input_schema={
                 "type": "object",
@@ -81,7 +84,7 @@ class CronDeleteTool:
                 "properties": {"id": {"type": "string"}},
                 "required": ["id"],
             },
-            is_read_only=True,
+            is_read_only=False,
             max_result_size_chars=100_000,
             strict=True,
         )

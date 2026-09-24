@@ -16,6 +16,37 @@ def get_config_path() -> Path:
     return config_dir / "config.json"
 
 
+def load_secrets_env() -> Path | None:
+    """Load Clawd's external secrets file without overriding process env vars."""
+    configured_path = os.environ.get("CLAWD_SECRETS_FILE", "").strip()
+    secrets_path = (
+        Path(configured_path).expanduser()
+        if configured_path
+        else Path(__file__).resolve().parents[2] / "Secrets" / ".env"
+    )
+    if not secrets_path.is_file():
+        return None
+
+    with secrets_path.open("r", encoding="utf-8-sig") as handle:
+        for raw_line in handle:
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            if line.startswith("export "):
+                line = line[7:].lstrip()
+
+            name, value = line.split("=", 1)
+            name = name.strip()
+            value = value.strip()
+            if not name:
+                continue
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
+                value = value[1:-1]
+            os.environ.setdefault(name, value)
+
+    return secrets_path
+
+
 def _get_default_config_from_providers() -> dict[str, Any]:
     """Build default config using provider info registry."""
     from src.providers import PROVIDER_INFO
@@ -116,8 +147,25 @@ def save_config(config: dict[str, Any]) -> None:
         os.chmod(config_path, 0o600)
 
 
+def _provider_api_key_env(provider: str) -> str:
+    """Return the environment variable used for a provider API key."""
+    return {
+        "anthropic": "ANTHROPIC_API_KEY",
+        "openai": "OPENAI_API_KEY",
+        "deepseek": "DEEPSEEK_API_KEY",
+        "qwen": "DASHSCOPE_API_KEY",
+        "glm": "GLM_API_KEY",
+        "minimax": "MINIMAX_API_KEY",
+    }.get(
+        provider,
+        f"{provider.upper().replace('-', '_').replace('.', '_')}_API_KEY",
+    )
+
+
 def get_provider_config(provider: str) -> dict[str, Any]:
     """Get configuration for a specific provider.
+
+    Environment keys override the stored key so secrets can live outside config.json.
 
     Args:
         provider: Provider name (anthropic, openai, glm, minimax)
@@ -128,10 +176,24 @@ def get_provider_config(provider: str) -> dict[str, Any]:
     config = load_config()
     providers = config.get("providers", {})
 
-    if provider not in providers:
-        raise ValueError(f"Unknown provider: {provider}")
+    if provider in providers:
+        provider_config = dict(providers[provider])
+    else:
+        from src.providers import PROVIDER_INFO
 
-    return providers[provider]
+        info = PROVIDER_INFO.get(provider)
+        if info is None:
+            raise ValueError(f"Unknown provider: {provider}")
+        provider_config = {
+            "api_key": "",
+            "base_url": info["default_base_url"],
+            "default_model": info["default_model"],
+        }
+
+    env_key = os.environ.get(_provider_api_key_env(provider), "").strip()
+    if env_key:
+        provider_config["api_key"] = env_key
+    return provider_config
 
 
 def set_api_key(provider: str, api_key: str, base_url: Optional[str] = None,

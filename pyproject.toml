@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "clawd-codex"
 version = "0.1.0"
-description = "A complete Python reimplementation of Claude Code CLI - Drop-in replacement experience"
+description = "A security-hardened Python CLI agent based on Claude Code architecture"
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.10"
@@ -27,7 +27,8 @@ dependencies = [
     "anthropic",
     "openai",
     "zhipuai",
-    "python-dotenv",
+    "google-auth[requests]>=2.0.0",
+    "google-auth-oauthlib>=1.2.0",
     "rich",
     "prompt-toolkit",
     "tiktoken>=0.7.0",
@@ -38,16 +39,61 @@ dev = [
     "build>=1.0.0",
     "twine>=5.0.0",
     "pytest>=8.0.0",
+    "ruff>=0.16.8",
+    "mypy>=2.3.1",
+]
+
+[dependency-groups]
+# Keep this in sync with project.optional-dependencies.dev so both modern
+# uv workflows and the existing pip-compatible .[dev] extra remain supported.
+dev = [
+    "build>=1.0.0",
+    "twine>=5.0.0",
+    "pytest>=8.0.0",
+    "ruff>=0.16.8",
+    "mypy>=2.3.1",
 ]
 
 [project.scripts]
 clawd = "src.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/GPT-AGI/Clawd-Codex"
-Repository = "https://github.com/GPT-AGI/Clawd-Codex"
-Documentation = "https://github.com/GPT-AGI/Clawd-Codex#readme"
+Homepage = "https://github.com/GPT-AGI/Clawd-Code"
+Repository = "https://github.com/GPT-AGI/Clawd-Code"
+Documentation = "https://github.com/GPT-AGI/Clawd-Code#readme"
 
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["src*"]
+
+[tool.setuptools.package-data]
+"src" = ["capability_manifest.json"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+
+[tool.ruff.lint]
+# Start with correctness failures that should never be grandfathered in.
+# Broader style/modernization rules can be enabled incrementally.
+select = ["E9", "F63", "F7", "F82"]
+
+[tool.mypy]
+python_version = "3.10"
+files = [
+    "src/config.py",
+    "src/capabilities.py",
+    "src/context_system/context_analyzer.py",
+    "src/tool_system/tools/data.py",
+]
+# This is an explicit gradual-typing baseline. Imported legacy modules are
+# not silently promoted to "typed" merely because these entry files import them.
+follow_imports = "skip"
+ignore_missing_imports = true
+check_untyped_defs = true
+warn_unused_configs = true
+show_error_codes = true
+pretty = true

@@ -1,17 +1,14 @@
 from __future__ import annotations
 
-from pathlib import Path
-
-from .loader import load_tools_from_dir
 from .registry import ToolRegistry
 from .tools import (
     AskUserQuestionTool,
-    BashTool,
     BriefTool,
-    ConfigTool,
     CronCreateTool,
     CronDeleteTool,
     CronListTool,
+    DataInspectTool,
+    DataTransformTool,
     EnterPlanModeTool,
     EnterWorktreeTool,
     ExitPlanModeTool,
@@ -21,14 +18,15 @@ from .tools import (
     FileWriteTool,
     GlobTool,
     GrepTool,
+    GeminiThinkTool,
     LSPTool,
-    ListMcpResourcesTool,
-    MCPTool,
+    MemoryTool,
     NotebookEditTool,
-    PowerShellTool,
-    REPLTool,
+    ListMcpResourcesTool,
     ReadMcpResourceTool,
-    RemoteTriggerTool,
+    ListMcpToolsTool,
+    MCPTool,
+    QwenMediaAnalyzeTool,
     SendMessageTool,
     SendUserMessageTool,
     SkillTool,
@@ -42,37 +40,42 @@ from .tools import (
     TaskOutputTool,
     TaskStopTool,
     TaskUpdateTool,
-    TestingPermissionTool,
     TodoWriteTool,
     WebFetchTool,
     WebSearchTool,
+    YouTubeAnalyzeTool,
 )
 from .tools.agent import AgentTool
 from .tools.tool_search import ToolSearchTool
 
 
-def build_default_registry(*, include_user_tools: bool = True) -> ToolRegistry:
+def build_default_registry(*, include_user_tools: bool = False) -> ToolRegistry:
     registry = ToolRegistry(
         tools=[
             SendUserMessageTool(),
-            BashTool(),
             FileReadTool(),
             FileWriteTool(),
             FileEditTool(),
+            DataInspectTool(),
+            DataTransformTool(),
             GlobTool(),
             GrepTool(),
-            WebFetchTool(),
+            GeminiThinkTool(),
+            LSPTool(),
+            QwenMediaAnalyzeTool(),
             WebSearchTool(),
+            WebFetchTool(),
+            YouTubeAnalyzeTool(),
             SleepTool(),
             TaskStopTool(),
-            ConfigTool(),
-            MCPTool(),
-            ListMcpResourcesTool(),
-            ReadMcpResourceTool(),
-            LSPTool(),
-            SkillTool(),
             BriefTool(),
             AskUserQuestionTool(),
+            MemoryTool(),
+            NotebookEditTool(),
+            ListMcpResourcesTool(),
+            ReadMcpResourceTool(),
+            ListMcpToolsTool(),
+            MCPTool(),
             TodoWriteTool(),
             TaskCreateTool(),
             TaskGetTool(),
@@ -82,27 +85,24 @@ def build_default_registry(*, include_user_tools: bool = True) -> ToolRegistry:
             TeamCreateTool(),
             TeamDeleteTool(),
             EnterPlanModeTool(),
-            ExitPlanModeTool(),
             EnterWorktreeTool(),
+            ExitPlanModeTool(),
             ExitWorktreeTool(),
             CronCreateTool(),
             CronListTool(),
             CronDeleteTool(),
             SendMessageTool(),
             StructuredOutputTool(),
-            RemoteTriggerTool(),
-            PowerShellTool(),
-            NotebookEditTool(),
-            REPLTool(),
-            TestingPermissionTool(),
+            SkillTool(),
         ]
     )
     registry.register(AgentTool(registry))
     registry.register(ToolSearchTool(registry))
 
     if include_user_tools:
-        user_dir = Path.home() / ".clawd" / "tools"
-        for tool in load_tools_from_dir(user_dir):
-            registry.register(tool)
+        raise RuntimeError(
+            "Direct ~/.clawd/tools Python imports are disabled. "
+            "Use the operator-trusted Python plugin runtime instead."
+        )
 
     return registry

@@ -7,15 +7,30 @@ from pathlib import Path
 from typing import Any
 
 from ..context import ToolContext
-from ..errors import ToolExecutionError, ToolInputError
+from ..errors import ToolExecutionError, ToolInputError, ToolPermissionError
+from ..permission_handler import PermissionResult
+from ..permissions import sensitive_path_permission
 from ..protocol import ToolResult
 from ..registry import ToolSpec
 
 
 class FileReadTool:
+    def check_permissions(
+        self, tool_input: dict[str, Any], context: ToolContext
+    ) -> PermissionResult:
+        file_path = tool_input.get("file_path")
+        if not isinstance(file_path, str):
+            return PermissionResult.allow()
+        try:
+            path = context.ensure_allowed_path(file_path)
+        except ToolPermissionError as exc:
+            return PermissionResult.deny(str(exc))
+        return sensitive_path_permission(path, operation="read")
+
     def spec(self) -> ToolSpec:
         return ToolSpec(
             name="Read",
+            permission_policy="checked",
             description="Read a file from the local filesystem.",
             input_schema={
                 "type": "object",

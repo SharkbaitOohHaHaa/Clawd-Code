@@ -12,6 +12,7 @@ class BriefTool:
     def spec(self) -> ToolSpec:
         return ToolSpec(
             name="BriefPreview",
+            permission_policy="allow",
             description="Create a brief summary/preview of text content.",
             input_schema={
                 "type": "object",

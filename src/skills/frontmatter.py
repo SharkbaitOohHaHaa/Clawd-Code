@@ -4,6 +4,9 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Tuple
 
 
+_COMMA_LIST_KEYS = {"allowed-tools", "arguments", "paths"}
+
+
 @dataclass(frozen=True)
 class FrontmatterParseResult:
     frontmatter: Dict[str, Any]
@@ -22,8 +25,10 @@ def parse_frontmatter(markdown: str) -> FrontmatterParseResult:
         key:
           - item1
           - item2
-    - Lists via comma-separated shorthand:
-        key: a, b, c
+    - Lists via comma-separated shorthand for known list fields:
+        allowed-tools: Read, Grep
+    - Quoted scalar strings (commas remain part of the string)
+    - Folded/literal scalar blocks using >, >-, |, |-
     Any unsupported structure falls back to a string.
     """
     lines = markdown.splitlines()
@@ -64,13 +69,51 @@ def parse_frontmatter(markdown: str) -> FrontmatterParseResult:
                     break
             fm[key] = [_coerce_scalar(x) for x in items]
             continue
+
+        # Folded/literal YAML-style scalar block.
+        if value in {">", ">-", "|", "|-"}:
+            block_lines: List[str] = []
+            i += 1
+            while i < len(fm_lines):
+                item_line = fm_lines[i]
+                if item_line and not item_line[0].isspace():
+                    break
+                if item_line:
+                    block_lines.append(item_line.lstrip())
+                else:
+                    block_lines.append("")
+                i += 1
+            if value.startswith(">"):
+                paragraphs: List[str] = []
+                current: List[str] = []
+                for block_line in block_lines:
+                    if block_line == "":
+                        if current:
+                            paragraphs.append(" ".join(current))
+                            current = []
+                    else:
+                        current.append(block_line)
+                if current:
+                    paragraphs.append(" ".join(current))
+                fm[key] = "\n\n".join(paragraphs)
+            else:
+                fm[key] = "\n".join(block_lines)
+            continue
+
+        # Quoted scalar values must remain scalars even when they contain commas.
+        if _is_quoted_scalar(value):
+            fm[key] = _coerce_scalar(value)
+            i += 1
+            continue
+
         inline_list = _parse_inline_list(value)
         if inline_list is not None:
             fm[key] = inline_list
             i += 1
             continue
-        # Comma-separated list
-        if "," in value:
+        # Comma-separated shorthand is only safe for fields that are known lists.
+        # Descriptions and other free-text scalars commonly contain commas.
+        if key in _COMMA_LIST_KEYS and "," in value:
             fm[key] = [_coerce_scalar(v.strip()) for v in value.split(",") if v.strip()]
         else:
             fm[key] = _coerce_scalar(value.strip())
@@ -85,7 +128,26 @@ def _split_key_value(line: str) -> Tuple[str, str]:
     return key, value
 
 
+def _is_quoted_scalar(value: str) -> bool:
+    stripped = value.strip()
+    return (
+        len(stripped) >= 2
+        and stripped[0] in {'"', "'"}
+        and stripped[-1] == stripped[0]
+    )
+
+
 def _coerce_scalar(value: str) -> Any:
+    value = value.strip()
+    if _is_quoted_scalar(value):
+        quote = value[0]
+        inner = value[1:-1]
+        if quote == '"':
+            inner = inner.replace(r'\"', '"').replace(r"\\", "\\")
+        else:
+            inner = inner.replace("''", "'")
+        return inner
+
     low = value.lower()
     if low in ("true", "false"):
         return low == "true"

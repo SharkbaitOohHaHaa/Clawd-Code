@@ -15,6 +15,7 @@ class ToolSearchTool:
     def spec(self) -> ToolSpec:
         return ToolSpec(
             name="ToolSearch",
+            permission_policy="allow",
             description="Search for available tools by name or keywords.",
             input_schema={
                 "type": "object",

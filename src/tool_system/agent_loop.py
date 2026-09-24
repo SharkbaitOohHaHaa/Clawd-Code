@@ -4,16 +4,23 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable
 
 from .registry import ToolRegistry
 from .context import ToolContext
 from ..agent.conversation import Conversation, TextContentBlock, ToolUseContentBlock
 from ..context_system import build_context_prompt
+from ..context_system.microcompact import microcompact_messages, strip_images_from_messages
 from ..outputStyles import resolve_output_style
 from ..providers.base import BaseProvider, ChatResponse
 from ..providers.anthropic_provider import AnthropicProvider
 from ..providers.minimax_provider import MinimaxProvider
+from ..token_estimation import count_messages_tokens, count_tokens
+from ..context_system.context_analyzer import count_tool_definition_tokens, get_context_window_for_model
+
+
+DEFAULT_AGENT_MAX_OUTPUT_TOKENS = 4096
 
 
 def _is_anthropic_provider(provider: BaseProvider) -> bool:
@@ -108,6 +115,15 @@ class AgentLoopResult:
     num_turns: int = 0
 
 
+@dataclass(frozen=True)
+class AgentPreflight:
+    """Exact model-visible components for the first agent request."""
+    tool_schemas: list[dict[str, Any]]
+    effective_system_prompt: str
+    api_messages: list[dict[str, Any]]
+    estimated_input_tokens: int
+
+
 ToolEventHandler = Callable[[ToolEvent], None]
 TextChunkHandler = Callable[[str], None]
 
@@ -166,17 +182,113 @@ def _call_provider_for_turn(
     return response, False
 
 
-def _build_effective_system_prompt(style_prompt: str, tool_context: ToolContext) -> str:
+def _build_effective_system_prompt(
+    style_prompt: str,
+    tool_context: ToolContext,
+    *,
+    memory_query: str = "",
+) -> str:
     try:
         context_prompt = build_context_prompt(
             tool_context.workspace_root,
             cwd=tool_context.cwd,
+            memory_query=memory_query,
         )
     except Exception:
         context_prompt = ""
     if not context_prompt.strip():
         return style_prompt
     return f"{style_prompt}\n\n{context_prompt}"
+
+
+def _last_user_text(conversation: Conversation) -> str:
+    for message in reversed(conversation.messages):
+        if message.role != "user":
+            continue
+        if isinstance(message.content, str):
+            return message.content
+        text_parts = [
+            block.text for block in message.content
+            if isinstance(block, TextContentBlock) and block.text
+        ]
+        if text_parts:
+            return "\n".join(text_parts)
+    return ""
+
+
+def _prepare_anthropic_messages(
+    conversation: Conversation,
+    *,
+    context_window: int,
+    fixed_input_tokens: int,
+    output_reserve_tokens: int = DEFAULT_AGENT_MAX_OUTPUT_TOKENS,
+) -> list[dict[str, Any]]:
+    """Build model-visible history and compact only under real context pressure."""
+    messages = strip_images_from_messages(conversation.get_messages())
+    estimated_request_tokens = (
+        max(0, fixed_input_tokens)
+        + count_messages_tokens(messages)
+        + max(0, output_reserve_tokens)
+    )
+    if context_window > 0 and estimated_request_tokens >= context_window:
+        compacted, _ = microcompact_messages(messages)
+        return compacted
+    return messages
+
+
+def _tool_schemas_for_context(
+    tool_registry: ToolRegistry,
+    tool_context: ToolContext,
+) -> list[dict[str, Any]]:
+    return [
+        {"name": spec.name, "description": spec.description, "input_schema": spec.input_schema}
+        for spec in tool_registry.list_specs()
+        if tool_context.is_tool_allowed(spec.name, aliases=spec.aliases)
+    ]
+
+
+def build_agent_preflight(
+    conversation: Conversation,
+    provider: BaseProvider,
+    tool_registry: ToolRegistry,
+    tool_context: ToolContext,
+) -> AgentPreflight:
+    """Assemble and estimate the exact components of the first agent request."""
+    user_text = _last_user_text(conversation)
+    tool_schemas = _tool_schemas_for_context(tool_registry, tool_context)
+    style_name = getattr(tool_context, "output_style_name", None)
+    style_dir = getattr(tool_context, "output_style_dir", None)
+    style_prompt = resolve_output_style(style_name, style_dir).prompt
+    effective_system_prompt = _build_effective_system_prompt(
+        style_prompt,
+        tool_context,
+        memory_query=user_text,
+    )
+
+    fixed_input_tokens = (
+        count_tokens(effective_system_prompt)
+        + count_tool_definition_tokens(tool_schemas)
+    )
+    if _is_anthropic_provider(provider):
+        api_messages = _prepare_anthropic_messages(
+            conversation,
+            context_window=get_context_window_for_model(str(provider.model or "")),
+            fixed_input_tokens=fixed_input_tokens,
+        )
+    else:
+        api_messages = [
+            {"role": msg.role, "content": msg.content}
+            for msg in conversation.messages
+            if isinstance(msg.content, str)
+        ]
+
+    estimated_input_tokens = fixed_input_tokens + count_messages_tokens(api_messages)
+    return AgentPreflight(
+        tool_schemas=tool_schemas,
+        effective_system_prompt=effective_system_prompt,
+        api_messages=api_messages,
+        estimated_input_tokens=estimated_input_tokens,
+    )
 
 
 def summarize_tool_use(name: str, tool_input: dict[str, Any]) -> str:
@@ -237,7 +349,7 @@ def summarize_tool_use(name: str, tool_input: dict[str, Any]) -> str:
 
 
 
-def run_agent_loop(
+def _run_agent_loop_impl(
     conversation: Conversation,
     provider: BaseProvider,
     tool_registry: ToolRegistry,
@@ -247,6 +359,7 @@ def run_agent_loop(
     verbose: bool = False,
     on_event: ToolEventHandler | None = None,
     on_text_chunk: TextChunkHandler | None = None,
+    preflight: AgentPreflight | None = None,
 ) -> AgentLoopResult:
     """Run agent loop: LLM -> tools -> LLM until no more tools or max turns.
 
@@ -264,48 +377,79 @@ def run_agent_loop(
     Returns:
         AgentLoopResult with final text response, usage info, and turn count
     """
-    # Convert tools to schemas (Anthropic format)
-    tool_schemas = []
-    for spec in tool_registry.list_specs():
-        tool_schemas.append({
-            "name": spec.name,
-            "description": spec.description,
-            "input_schema": spec.input_schema,
-        })
+    # Reuse the REPL-approved first-request preflight when supplied so the
+    # estimate and the request are built from the same model-visible components.
+    preflight = preflight or build_agent_preflight(
+        conversation, provider, tool_registry, tool_context
+    )
+    tool_schemas = preflight.tool_schemas
+    tool_allowlist_snapshot = tool_context.tool_allowlist
+    effective_system_prompt = preflight.effective_system_prompt
+    anthropic_fixed_input_tokens = (
+        count_tokens(effective_system_prompt)
+        + count_tool_definition_tokens(tool_schemas)
+    )
+    anthropic_context_window = (
+        get_context_window_for_model(str(provider.model or ""))
+        if _is_anthropic_provider(provider)
+        else 0
+    )
+    context_cwd = Path(tool_context.cwd or tool_context.workspace_root).resolve()
+    memory_query = _last_user_text(conversation)
 
-    # For OpenAI/GLM, keep separate message list in OpenAI format
-    openai_messages: list[dict[str, Any]] = []
+    # For OpenAI/GLM, keep separate message list in OpenAI format.
+    openai_messages: list[dict[str, Any]] = list(preflight.api_messages)
     last_user_visible_message: str | None = None
-    style_name = getattr(tool_context, "output_style_name", None)
-    style_dir = getattr(tool_context, "output_style_dir", None)
-    style_prompt = resolve_output_style(style_name, style_dir).prompt
-    effective_system_prompt = _build_effective_system_prompt(style_prompt, tool_context)
-
-    # Seed OpenAI messages from initial conversation messages
-    for msg in conversation.messages:
-        if isinstance(msg.content, str):
-            openai_messages.append({"role": msg.role, "content": msg.content})
-        else:
-            # If there are already block messages, we are probably Anthropic; leave as is
-            pass
 
     # Track usage across all turns
     total_usage: dict[str, int] = {"input_tokens": 0, "output_tokens": 0}
     turn_count = 0
 
     for turn in range(max_turns):
+        if tool_context.tool_allowlist != tool_allowlist_snapshot:
+            tool_schemas = _tool_schemas_for_context(tool_registry, tool_context)
+            anthropic_fixed_input_tokens = (
+                count_tokens(effective_system_prompt)
+                + count_tool_definition_tokens(tool_schemas)
+            )
+            tool_allowlist_snapshot = tool_context.tool_allowlist
+
+        current_cwd = Path(tool_context.cwd or tool_context.workspace_root).resolve()
+        if current_cwd != context_cwd:
+            style_name = getattr(tool_context, "output_style_name", None)
+            style_dir = getattr(tool_context, "output_style_dir", None)
+            style_prompt = resolve_output_style(style_name, style_dir).prompt
+            effective_system_prompt = _build_effective_system_prompt(
+                style_prompt,
+                tool_context,
+                memory_query=memory_query,
+            )
+            anthropic_fixed_input_tokens = (
+                count_tokens(effective_system_prompt)
+                + count_tool_definition_tokens(tool_schemas)
+            )
+            context_cwd = current_cwd
+
         if _is_anthropic_provider(provider):
-            api_messages = conversation.get_messages()
+            api_messages = (
+                preflight.api_messages
+                if turn == 0
+                else _prepare_anthropic_messages(
+                    conversation,
+                    context_window=anthropic_context_window,
+                    fixed_input_tokens=anthropic_fixed_input_tokens,
+                )
+            )
         else:
-            # Use OpenAI formatted messages for non-Anthropic
-            api_messages = openai_messages
+            # Keep the effective system/workspace context on every OpenAI-compatible turn.
+            api_messages = [
+                {"role": "system", "content": effective_system_prompt},
+                *openai_messages,
+            ]
 
         call_kwargs: dict[str, Any] = {"tools": tool_schemas}
         if _is_anthropic_provider(provider):
             call_kwargs["system"] = effective_system_prompt
-        else:
-            if turn == 0:
-                api_messages = [{"role": "system", "content": effective_system_prompt}, *api_messages]
         response, streamed_live_text = _call_provider_for_turn(
             provider=provider,
             api_messages=api_messages,
@@ -315,10 +459,14 @@ def run_agent_loop(
         )
         turn_count += 1
 
-        # Collect usage info
+        # Collect provider-reported usage across all turns.
         if response.usage:
-            total_usage["input_tokens"] += response.usage.get("input_tokens", 0)
-            total_usage["output_tokens"] += response.usage.get("output_tokens", 0)
+            total_usage["input_tokens"] += int(response.usage.get("input_tokens", 0) or 0)
+            total_usage["output_tokens"] += int(response.usage.get("output_tokens", 0) or 0)
+            for field in ("thought_tokens", "tool_use_tokens", "cached_tokens", "total_tokens"):
+                value = int(response.usage.get(field, 0) or 0)
+                if value:
+                    total_usage[field] = total_usage.get(field, 0) + value
 
         # Build assistant content for Anthropic or just text for OpenAI
         final_assistant_content = response.content or ""
@@ -344,6 +492,8 @@ def run_agent_loop(
             conversation.add_assistant_message(final_assistant_content)
             # Add assistant message to OpenAI messages (text only)
             openai_assistant_msg: dict[str, Any] = {"role": "assistant", "content": final_assistant_content}
+            if response.reasoning_content:
+                openai_assistant_msg["reasoning_content"] = response.reasoning_content
             # If there are tool_uses, add them in OpenAI format
             if response.tool_uses:
                 # Build OpenAI tool_calls
@@ -428,7 +578,7 @@ def run_agent_loop(
                     ),
                 )
                 if _is_anthropic_provider(provider):
-                    conversation.add_tool_result_message(tool_id, result_output)
+                    conversation.add_tool_result_message(tool_id, _build_openai_tool_result_content(result_output))
                 else:
                     # Add tool result in OpenAI format
                     openai_messages.append({
@@ -466,3 +616,34 @@ def run_agent_loop(
         usage=total_usage if total_usage["input_tokens"] > 0 or total_usage["output_tokens"] > 0 else None,
         num_turns=turn_count,
     )
+
+
+def run_agent_loop(
+    conversation: Conversation,
+    provider: BaseProvider,
+    tool_registry: ToolRegistry,
+    tool_context: ToolContext,
+    max_turns: int = 20,
+    stream: bool = False,
+    verbose: bool = False,
+    on_event: ToolEventHandler | None = None,
+    on_text_chunk: TextChunkHandler | None = None,
+    preflight: AgentPreflight | None = None,
+) -> AgentLoopResult:
+    """Run the agent loop while containing temporary skill tool restrictions."""
+    previous_allowlist = tool_context.tool_allowlist
+    try:
+        return _run_agent_loop_impl(
+            conversation=conversation,
+            provider=provider,
+            tool_registry=tool_registry,
+            tool_context=tool_context,
+            max_turns=max_turns,
+            stream=stream,
+            verbose=verbose,
+            on_event=on_event,
+            on_text_chunk=on_text_chunk,
+            preflight=preflight,
+        )
+    finally:
+        tool_context.tool_allowlist = previous_allowlist

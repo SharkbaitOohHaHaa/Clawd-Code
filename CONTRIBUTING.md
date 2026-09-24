@@ -20,10 +20,10 @@ This project follows the [Contributor Covenant Code of Conduct](https://www.cont
 
 ### Prerequisites
 
-- Python 3.10 or higher (3.11 recommended for local development)
-- `uv` (recommended) or `pip`
+- Python 3.10 or higher; local development is pinned to Python 3.12 via `.python-version`
+- `uv` for the canonical locked developer workflow; `pip install -e ".[dev]"` remains supported as a compatibility path
 - git
-- A valid API key from at least one provider (Anthropic, OpenAI, or GLM)
+- A valid API key from at least one provider (Anthropic, OpenAI, DeepSeek, Qwen, GLM, or MiniMax)
 
 ### Initial Setup
 
@@ -35,38 +35,30 @@ git clone https://github.com/YOUR_USERNAME/Clawd-Code.git
 cd Clawd-Code
 ```
 
-2. **Create a virtual environment**
+2. **Sync the locked developer environment**
 
 ```bash
-uv venv --python 3.11
-source .venv/bin/activate  # On Windows: .venv\Scripts\activate
+uv sync --locked
 ```
 
-3. **Install dependencies**
+The `dev` dependency group is synced by default and includes pytest, Ruff, Mypy, build, and twine. No manual virtual-environment activation is required when using `uv run`.
+
+3. **Configure your API key when you need live provider access**
 
 ```bash
-uv pip install -r requirements.txt
-uv pip install -e ".[dev]"
+uv run python -m src.cli login
+# or use provider-specific environment variables
 ```
 
-4. **Install development tools**
+4. **Run the developer quality gates**
 
 ```bash
-uv pip install black isort mypy pytest
+uv run --locked pytest
+uv run --locked ruff check src tests
+uv run --locked mypy
 ```
 
-5. **Configure your API key**
-
-```bash
-python -m src.cli login
-# or use environment variables such as GLM_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY
-```
-
-6. **Run tests to verify setup**
-
-```bash
-python -m pytest tests/ -q
-```
+For environments that cannot use uv, the compatibility extra remains available with `python -m pip install -e ".[dev]"`.
 
 ## Project Structure
 
@@ -93,7 +85,15 @@ Clawd-Code/
   - `base.py`: Abstract base class for providers
   - `anthropic_provider.py`: Anthropic/Claude integration
   - `openai_provider.py`: OpenAI/GPT integration
+  - `deepseek_provider.py`: DeepSeek integration
+  - `qwen_provider.py`: Alibaba Qwen integration
   - `glm_provider.py`: GLM/Zhipu AI integration
+  - `minimax_provider.py`: MiniMax integration
+
+- **`src/plugins/`**: Exact-hash operator-approved Python extension runtime
+  - `runtime.py`: Manifest discovery and operator hash activation
+  - `extensions.py`: Commands, tools, providers, and declarative `WORKFLOWS`
+  - Workflows must declare a non-empty tool allowlist and reuse existing tool permissions
 
 - **`src/repl/`**: Interactive REPL implementation
   - `core.py`: Main REPL logic
@@ -115,9 +115,9 @@ Clawd-Code/
 
 We follow PEP 8 with a few modifications:
 
-- **Line length**: 88 characters (Black default)
-- **Quotes**: Double quotes for strings, single quotes for dict keys
-- **Imports**: Sorted with isort
+- **Line length**: 100 characters preferred (matches the project Ruff setting; not currently enforced as a style rule)
+- **Quotes**: Preserve the surrounding module's established style
+- **Imports**: Keep imports grouped and readable; the current Ruff gate does not enforce sorting
 
 ### Type Hints
 
@@ -155,30 +155,23 @@ def calculate_cost(tokens: int, model: str) -> float:
     pass
 ```
 
-### Code Formatting
+### Linting
 
-We use **Black** for code formatting and **isort** for import sorting:
+Ruff is configured as a correctness-focused baseline. The current gate intentionally checks high-severity parse/name errors rather than forcing a repository-wide style rewrite:
 
 ```bash
-# Format code
-black src/ tests/
-
-# Sort imports
-isort src/ tests/
-
-# Or both at once
-black src/ tests/ && isort src/ tests/
+uv run --locked ruff check src tests
 ```
 
 ### Type Checking
 
-We use **mypy** for static type checking:
+Mypy is integrated as an explicit gradual-typing baseline:
 
 ```bash
-mypy src/
+uv run --locked mypy
 ```
 
-Aim for zero mypy errors in new code.
+The checked file set is declared in `pyproject.toml`. Expand that set as modules become type-clean instead of masking unrelated legacy errors.
 
 ## Commit Guidelines
 
@@ -239,18 +232,12 @@ git checkout -b feature/your-feature-name
 3. **Run quality checks**
 
 ```bash
-# Format code
-black src/ tests/
-isort src/ tests/
+uv run --locked ruff check src tests
+uv run --locked mypy
+uv run --locked pytest
 
-# Type check
-mypy src/
-
-# Run tests
-python -m pytest tests/ -q
-
-# Test your changes manually
-python -m src.cli
+# Test your changes manually when the change needs runtime interaction
+uv run --locked python -m src.cli
 ```
 
 4. **Commit your changes**
@@ -276,8 +263,8 @@ git push origin feature/your-feature-name
 ### PR Requirements
 
 - All tests must pass
-- Code must be formatted with Black and isort
-- No mypy errors
+- The configured Ruff correctness gate must pass
+- The configured Mypy baseline passes
 - New code must have type hints and docstrings
 - New features must have tests
 - Documentation must be updated (if applicable)
@@ -295,13 +282,13 @@ git push origin feature/your-feature-name
 
 ```bash
 # Run all tests
-python -m pytest tests/ -q
+uv run --locked pytest
 
 # Run specific test file
-python -m pytest tests/test_tool_system_tools.py -q
+uv run --locked pytest tests/test_tool_system_tools.py -q
 
-# Run with coverage
-python -m pytest tests/ --cov=src --cov-report=html
+# Run with coverage without permanently adding pytest-cov
+uv run --locked --with pytest-cov pytest --cov=src --cov-report=html
 ```
 
 ### Writing Tests
@@ -328,7 +315,7 @@ def test_save_and_load_config(tmp_path):
             "glm": {
                 "api_key": "test_key",
                 "base_url": "https://example.com",
-                "default_model": "glm-4"
+                "default_model": "glm-5-turbo"
             }
         }
     }

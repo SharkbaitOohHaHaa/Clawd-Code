@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
@@ -19,6 +20,11 @@ def collect_git_context(workspace_root: str | Path) -> GitContext:
     if not repo_root_text:
         return GitContext(available=False, error="unable to resolve git root")
     repo_root = Path(repo_root_text).resolve()
+    if not repo_root.is_relative_to(cwd):
+        return GitContext(
+            available=False,
+            error="git repository root is outside workspace",
+        )
 
     branch = _read_git_text(repo_root, "symbolic-ref", "--short", "HEAD")
     if not branch:
@@ -48,13 +54,29 @@ def _read_git_text(cwd: Path, *args: str) -> str | None:
 
 
 def _run_git(cwd: Path, *args: str) -> subprocess.CompletedProcess[str] | None:
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if not key.upper().startswith("GIT_")
+    }
+    env.update(
+        {
+            "GIT_TERMINAL_PROMPT": "0",
+            "GIT_OPTIONAL_LOCKS": "0",
+            "GIT_PAGER": "cat",
+        }
+    )
+
     try:
         return subprocess.run(
-            ["git", *args],
+            ["git", "--no-pager", "-c", "core.fsmonitor=false", *args],
             cwd=str(cwd),
             capture_output=True,
             text=True,
             check=False,
+            stdin=subprocess.DEVNULL,
+            timeout=5,
+            env=env,
         )
     except Exception:
         return None

@@ -1,9 +1,9 @@
 """
 Microcompact: lightweight message pre-processing.
 
-Strips images/documents from messages and clears old tool results
-when the cache is cold (time-based trigger). This reduces tokens
-sent to the API without losing the model-visible history structure.
+Strips images/documents from messages and can clear old tool results when a
+caller has established context pressure. The agent loop is responsible for
+that pressure decision; manual compaction may invoke this directly.
 """
 
 from __future__ import annotations
@@ -124,8 +124,8 @@ def microcompact_messages(
     Lightweight compact of old tool results.
 
     Clears content from compactable tool results beyond the most recent
-    `keep_recent` ones. This mirrors the TypeScript time-based microcompact
-    (without the time-gate, for simplicity).
+    `keep_recent` ones. Callers decide whether context pressure justifies
+    invoking this operation.
 
     Returns:
         Tuple of (modified_messages, tokens_saved)
@@ -134,7 +134,7 @@ def microcompact_messages(
     compactable_ids: list[str] = []
     for msg in messages:
         content = msg.get("content", [])
-        if msg.get("type") == "assistant" and isinstance(content, list):
+        if msg.get("role") == "assistant" and isinstance(content, list):
             for block in content:
                 if (
                     isinstance(block, dict)

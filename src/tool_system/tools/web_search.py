@@ -8,6 +8,7 @@ from typing import Any
 
 from ..context import ToolContext
 from ..errors import ToolInputError
+from ..permission_handler import PermissionResult
 from ..protocol import ToolResult
 from ..registry import ToolSpec
 
@@ -24,9 +25,13 @@ def _strip_tags(s: str) -> str:
 
 
 class WebSearchTool:
+    def check_permissions(self, tool_input: dict[str, Any], context: ToolContext) -> PermissionResult:
+        return PermissionResult.ask(f"Allow web search for: {tool_input.get('query', '')}")
+
     def spec(self) -> ToolSpec:
         return ToolSpec(
             name="WebSearch",
+            permission_policy="checked",
             description="Search the web and return top results.",
             input_schema={
                 "type": "object",
@@ -50,7 +55,13 @@ class WebSearchTool:
             raise ToolInputError("num must be an integer between 1 and 10")
 
         url = "https://duckduckgo.com/html/?" + urllib.parse.urlencode({"q": query})
-        req = urllib.request.Request(url, headers={"User-Agent": "clawd-codex/0.1"})
+        req = urllib.request.Request(
+            url,
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/153.0.0.0 Safari/537.36",
+                "Accept-Language": "en-US,en;q=0.9",
+            },
+        )
         with urllib.request.urlopen(req, timeout=15) as resp:
             raw = resp.read(1_000_000).decode("utf-8", errors="replace")
 

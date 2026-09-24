@@ -45,6 +45,12 @@ class Message:
     _is_internal: bool = field(default=False, repr=False)
 
 
+def _contains_tool_result(message: Message) -> bool:
+    if message.role != "user" or not isinstance(message.content, list):
+        return False
+    return any(isinstance(block, ToolResultContentBlock) for block in message.content)
+
+
 @dataclass
 class Conversation:
     """Conversation manager."""
@@ -52,11 +58,37 @@ class Conversation:
     max_history: int = 100
 
     def add_message(self, role: str, content: Union[str, list[ContentBlock]]):
-        """Add a message to conversation."""
-        if len(self.messages) >= self.max_history:
+        """Add a message while keeping bounded history provider-safe."""
+        self.messages.append(Message(role=role, content=content))
+        self._trim_history()
+
+    def _trim_history(self) -> None:
+        limit = max(0, int(self.max_history))
+        if limit == 0:
+            self.messages.clear()
+            return
+
+        while len(self.messages) > limit:
             self.messages.pop(0)
 
-        self.messages.append(Message(role=role, content=content))
+        # A tool_result is only valid when its matching assistant tool_use is
+        # still present before it. FIFO eviction can remove that assistant
+        # message first, so never expose a leading orphan tool result.
+        while True:
+            first_visible = next(
+                (
+                    index
+                    for index, message in enumerate(self.messages)
+                    if not getattr(message, "_is_internal", False)
+                ),
+                None,
+            )
+            if first_visible is None:
+                return
+            message = self.messages[first_visible]
+            if not _contains_tool_result(message):
+                return
+            self.messages.pop(first_visible)
 
     def add_user_message(self, text: str):
         """Add a plain user text message."""

@@ -27,6 +27,7 @@ class MinimaxProvider(BaseProvider):
     """
 
     DEFAULT_BASE_URL = "https://api.minimaxi.com/anthropic"
+    DEFAULT_MODEL = "MiniMax-M3"
 
     def __init__(
         self, api_key: str, base_url: Optional[str] = None, model: Optional[str] = None
@@ -36,10 +37,10 @@ class MinimaxProvider(BaseProvider):
         Args:
             api_key: Minimax API key
             base_url: Base URL (optional, defaults to Minimax Anthropic-compatible endpoint)
-            model: Default model (default: MiniMax-M2.7)
+            model: Default model (default: MiniMax-M3)
         """
         resolved_base_url = base_url or self.DEFAULT_BASE_URL
-        super().__init__(api_key, resolved_base_url, model or "MiniMax-M2.7")
+        super().__init__(api_key, resolved_base_url, model or self.DEFAULT_MODEL)
 
         self._client_kwargs: dict[str, Any] = {"api_key": api_key}
         if resolved_base_url:
@@ -215,7 +216,8 @@ class MinimaxProvider(BaseProvider):
             List of model names
         """
         return [
-            # M2 series (latest)
+            "MiniMax-M3",
+            # M2 series
             "MiniMax-M2.7",
             "MiniMax-M2.7-highspeed",
             "MiniMax-M2.5",

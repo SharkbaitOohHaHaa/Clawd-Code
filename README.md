@@ -2,9 +2,9 @@
 
 **English** | [中文](#中文版) | [Français](docs/i18n/README_FR.md) | [Русский](docs/i18n/README_RU.md) | [हिन्दी](docs/i18n/README_HI.md) | [العربية](docs/i18n/README_AR.md) | [Português](docs/i18n/README_PT.md)
 
-# 🚀 Clawd-Code
+# 🚀 Claude Code Python
 
-**A Complete Python Reimplementation Based on Real Claude Code Source**
+**A Security-Hardened Python Reimplementation Based on Claude Code Architecture**
 
 *From TypeScript Source → Rebuilt in Python with ❤️*
 
@@ -16,7 +16,7 @@
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/downloads/)
 
 
-**🔥 Active Development • New Features Weekly 🔥**
+**🔥 Active Development 🔥**
 
 </div>
 
@@ -24,7 +24,7 @@
 
 ## 🎯 Why Clawd Code?
 
-**Clawd Code** is a **production-oriented Python rebuild of Claude Code**, ported from the **real TypeScript architecture** and shipped as a **working CLI agent**, not just a source dump.
+**Clawd Code** is a **security-hardened Python rebuild based on Claude Code architecture**, shipped as a **working CLI agent**, not just a source dump.
 
 - **Real Agent Runtime** — tool-calling loop, streaming REPL, session history, and multi-turn execution
 - **High-Fidelity Port** — keeps the original Claude Code architecture while adapting it to idiomatic Python
@@ -102,7 +102,7 @@ Explain the code in $path. Start with an analogy, then draw a diagram.
 ### Multi-Provider Support
 
 ```python
-providers = ["Anthropic Claude", "OpenAI GPT", "Zhipu GLM"]  # + easy to extend
+providers = ["Anthropic Claude", "OpenAI GPT", "DeepSeek", "Alibaba Qwen", "Zhipu GLM", "MiniMax AI"]  # + easy to extend
 ```
 
 ### Interactive REPL
@@ -119,7 +119,7 @@ Assistant: Hi! I'm Clawd Codex, a Python reimplementation...
 >>> /explain-code qsort.py   # Run a skill
 ```
 
-### Complete CLI
+### Working CLI
 
 ```bash
 clawd              # Start REPL
@@ -134,9 +134,9 @@ clawd config       # View settings
 
 | Component     | Status     | Count     |
 | ------------- | ---------- | --------- |
-| REPL Commands | ✅ Complete | 6+ built-ins |
+| REPL Commands | ✅ Complete | Canonical command palette plus compatibility aliases |
 | Tool System   | ✅ Complete | 30+ tools |
-| Automated Tests | ✅ Present | Core suites for skills, providers, REPL, tools, context |
+| Automated Tests | ✅ Present | 550+ verified tests covering commands, packaging contracts, security, skills, providers, REPL, tools, context, memory, permissions, plugins, and recovery |
 | Documentation | ✅ Complete | 10+ docs  |
 
 ### Core Systems
@@ -145,35 +145,36 @@ clawd config       # View settings
 |--------|--------|-------------|
 | CLI Entry | ✅ | `clawd`, `login`, `config`, `--version` |
 | Interactive REPL | ✅ | Rich interactive output, history, tab completion, multiline |
-| Multi-Provider | ✅ | Anthropic, OpenAI, GLM support |
+| Multi-Provider | ✅ | Anthropic, OpenAI, DeepSeek, Qwen, GLM, MiniMax support |
 | Session Persistence | ✅ | Save/load sessions locally |
 | Agent Loop | ✅ | Tool calling loop implementation |
 | Skill System | ✅ | SKILL.md-based slash-command skills with args + tool limits |
-| Context Building | 🟡 | Initial prompt injection for workspace, git, and CLAUDE.md; deeper project understanding still needed |
-| Permission System | 🟡 | Framework exists, needs integration |
+| Context Building | ✅ | Bounded workspace/project map, README + entry-file overview, git state, hierarchical CLAUDE.md instructions, and persistent memory are injected into the agent loop |
+| Permission System | ✅ | Explicit tool contracts, sensitive-path protection, and fail-closed operator/project permission policies are integrated; project policy can only reduce operator-granted authority |
 
-### Tool System (30+ Tools Implemented)
+### Runtime Capability Truth
 
-| Category | Tools | Status |
-|----------|-------|--------|
-| File Operations | Read, Write, Edit, Glob, Grep | ✅ Complete |
-| System | Bash execution | ✅ Complete |
-| Web | WebFetch, WebSearch | ✅ Complete |
-| Interaction | AskUserQuestion, SendMessage | ✅ Complete |
-| Task Management | TodoWrite, TaskManager, TaskStop | ✅ Complete |
-| Agent Tools | Agent, Brief, Team | ✅ Complete |
-| Configuration | Config, PlanMode, Cron | ✅ Complete |
-| MCP | MCP tools and resources | ✅ Complete |
-| Others | LSP, Worktree, Skill, ToolSearch | ✅ Complete |
+The authoritative expected state lives in `src/capability_manifest.json`. The deterministic reconciler compares that declaration with the live registry, filesystem, and skill-trust evidence.
+
+<!-- CAPABILITY-MANIFEST:START -->
+| Capability state | Tools | Features |
+|---|---|---|
+| Active / supported | AskUserQuestion, CronCreate, CronDelete, CronList, DataInspect, DataTransform, Edit, EnterPlanMode, EnterWorktree, ExitPlanMode, ExitWorktree, Glob, Grep, LSP, ListMcpResourcesTool, ListMcpToolsTool, MCP, NotebookEdit, Read, ReadMcpResourceTool, Skill, Sleep, StructuredOutput, TaskCreate, TaskGet, TaskList, TaskOutput, TaskStop, TaskUpdate, TodoWrite, ToolSearch, WebFetch, WebSearch, Write | agent_loop, authentication_recovery, capability_manifest, capability_reconciler, chinese_provider_ecosystem, context_engine, custom_commands_tools, data_engineering_runtime, developer_quality_tooling, enterprise_workflow_extensions, full_registered_tool_schema, git_worktree_runtime, lsp_runtime, mcp_resource_runtime, mcp_runtime, permission_contract, permission_policy_configuration, project_setup_advisor, provider_extensions, python_plugin_runtime, sanitized_runtime_instrumentation, sensitive_path_policy, skill_trust_runtime |
+| Clawd-specific | Agent, BriefPreview, GeminiThink, Memory, QwenMediaAnalyze, SendMessage, SendUserMessage, TeamCreate, TeamDelete, YouTubeAnalyze |  |
+| Intentionally disabled | Bash, Config | hook_runtime |
+| Deferred / not production-ready |  | subagent_runtime |
+<!-- CAPABILITY-MANIFEST:END -->
 
 ### Roadmap Progress
 
 - ✅ **Phase 0**: Installable, runnable CLI
 - ✅ **Phase 1**: Core Claude Code MVP experience
 - ✅ **Phase 2**: Real tool calling loop
-- 🟡 **Phase 3**: Context, permissions, recovery (in progress)
-- ⏳ **Phase 4**: MCP, plugins, extensibility
-- ⏳ **Phase 5**: Python-native differentiators
+- ✅ **Phase 3**: Context, permissions, recovery
+- ✅ **Phase 4**: MCP, plugins, extensibility
+- ✅ **Phase 5**: Python-native differentiators
+
+The scoped Phase 0–5 roadmap is complete. This does **not** mean every possible Claude Code capability is implemented: the capability manifest remains authoritative and currently marks `subagent_runtime` as deferred and generic `hook_runtime` as intentionally disabled.
 
 **See [FEATURE_LIST.md](FEATURE_LIST.md) for detailed feature status and PR guidelines.**
 
@@ -203,7 +204,7 @@ python -m src.cli login
 
 This flow will:
 
-1. ask you to choose a provider: anthropic / openai / glm
+1. ask you to choose a provider: anthropic / openai / deepseek / qwen / glm / minimax
 2. ask for that provider's API key
 3. optionally save a custom base URL
 4. optionally save a default model
@@ -228,11 +229,20 @@ The configuration file is saved in in `~/.clawd/config.json`. Example structure:
     "glm": {
       "api_key": "base64-encoded-key",
       "base_url": "https://open.bigmodel.cn/api/paas/v4",
-      "default_model": "glm-4.5"
+      "default_model": "glm-5-turbo"
     }
   }
 }
 ```
+
+#### Permission policy
+
+Clawd loads permission policy at REPL startup from two fail-closed JSON manifests:
+
+- Operator policy: `~/.clawd/operator-permissions.json`
+- Repository restrictions: `<workspace>/.clawd/permissions.json`
+
+Both use `"schema_version": 1`. Operator policy may define `deny_tools`, `deny_tool_prefixes`, `additional_working_directories` (absolute existing directories only), and `allow_docs`. Repository policy may only add `deny_tools` / `deny_tool_prefixes` or set `allow_docs` to `false`; it cannot add working directories or enable documentation writes. Invalid or authority-expanding policy stops REPL startup instead of being ignored.
 
 ### Run
 
@@ -249,15 +259,21 @@ python -m src.cli --help   # Show help
 
 ### REPL Commands
 
-| Command      | Description           |
-| ------------ | --------------------- |
-| `/`          | Show commands & skills |
-| `/help`      | Show all commands     |
-| `/save`      | Save session          |
-| `/load <id>` | Load session          |
-| `/multiline` | Toggle multiline mode |
-| `/clear`     | Clear history         |
-| `/exit`      | Exit REPL             |
+| Command | Description |
+| --- | --- |
+| `/` | Show commands & skills |
+| `/help` | Show all commands |
+| `/clear-chat` | Clear the current conversation |
+| `/save-session` / `/load-session` | Save or load a session |
+| `/compact-context` / `/context-usage` | Compact or inspect context usage |
+| `/multiline-input` / `/stream-responses` | Control input and streaming |
+| `/usage` | Show API/model usage plus local skill/tool activity |
+| `/session-usage` | Show tokens tracked in the current JR session |
+| `/list-tools` / `/run-tool` / `/list-skills` | Inspect or run tools and skills |
+| `/setup-project` | Set up project guidance and optional skills |
+| `/exit` | Exit JR |
+
+Older short command names remain compatibility aliases but are not the canonical palette names.
 
 ### Skills (Slash Commands)
 
@@ -306,6 +322,32 @@ Example:
 - Tool limits: `allowed-tools` controls which tools the skill can use.
 - Arguments: use `$ARGUMENTS`, `$0`, `$1`, or named args like `$path` (from `arguments`).
 - Placeholder syntax: use `$path`, not `${path}`.
+
+### Trusted Plugin Workflows
+
+Exact-hash operator-approved Python plugins may expose declarative internal workflows without adding a second execution engine. Declare `workflows` in `plugin.json`, then export `WORKFLOWS` from the pinned plugin entrypoint:
+
+```json
+{
+  "schema_version": 1,
+  "name": "internal-ops",
+  "version": "1.0.0",
+  "entrypoint": "plugin.py",
+  "extensions": ["workflows"]
+}
+```
+
+```python
+WORKFLOWS = [{
+    "name": "release-audit",
+    "description": "Audit an internal release",
+    "prompt": "Audit release $ARGUMENTS using the approved tools.",
+    "allowed_tools": ["Read", "Grep"],
+    "argument_hint": "<release>",
+}]
+```
+
+Each workflow is registered as a plugin `PromptCommand` with `kind="workflow"`. `allowed_tools` is mandatory and non-empty; unknown tools, reserved names, and command/workflow collisions fail registration. Workflow execution uses the active Clawd session/model plus the existing tool permission system. It does not enable background workers, webhooks, or generic executable hooks.
 
 
 
@@ -359,8 +401,8 @@ Clawd-Code/
 
 ```bash
 # Quick dev setup
-pip install -e .[dev]
-python -m pytest tests/ -v
+uv sync --locked
+uv run --locked pytest -v
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
@@ -433,7 +475,7 @@ If you find this useful, please **star** ⭐ the repo!
 
 # 🚀 Claude Code Python
 
-**基于真实 Claude Code 源码的完整 Python 重实现**
+**基于 Claude Code 架构的安全加固 Python 重实现**
 
 *从 TypeScript 源码 → 用 Python 重建 ❤️*
 
@@ -534,7 +576,7 @@ arguments: [path]
 ### 多提供商支持
 
 ```python
-providers = ["Anthropic Claude", "OpenAI GPT", "Zhipu GLM"]  # + 易于扩展
+providers = ["Anthropic Claude", "OpenAI GPT", "DeepSeek", "Alibaba Qwen", "Zhipu GLM", "MiniMax AI"]  # + 易于扩展
 ```
 
 ### 交互式 REPL
@@ -577,35 +619,36 @@ clawd config       # 查看设置
 |------|------|------|
 | CLI 入口 | ✅ | `clawd`、`login`、`config`、`--version` |
 | 交互式 REPL | ✅ | 丰富的交互输出、历史记录、Tab 补全、多行输入 |
-| 多提供商支持 | ✅ | 支持 Anthropic、OpenAI、GLM |
+| 多提供商支持 | ✅ | 支持 Anthropic、OpenAI、DeepSeek、Qwen、GLM、MiniMax |
 | 会话持久化 | ✅ | 本地保存/加载会话 |
 | Agent Loop | ✅ | 工具调用循环实现 |
 | Skill 系统 | ✅ | 基于 SKILL.md 的 /skill 技能：参数替换 + 工具限制 |
-| 上下文构建 | 🟡 | 已接入 workspace、git、CLAUDE.md 的基础上下文注入，仍需补强项目级理解 |
-| 权限系统 | 🟡 | 框架已存在，需要集成 |
+| 上下文构建 | ✅ | Agent Loop 已注入 bounded workspace/project map、README + 入口文件概览、git、分层 CLAUDE.md 指令与持久 memory |
+| 权限系统 | ✅ | 已集成显式 tool permission 契约、敏感路径保护与 fail-closed operator/project 权限策略；project policy 只能收紧 operator 已授予的权限 |
 
-### 工具系统（已实现 30+ 工具）
+### 运行时能力真实状态
 
-| 类别 | 工具 | 状态 |
-|------|------|------|
-| 文件操作 | Read, Write, Edit, Glob, Grep | ✅ 完成 |
-| 系统 | Bash 执行 | ✅ 完成 |
-| 网络 | WebFetch, WebSearch | ✅ 完成 |
-| 交互 | AskUserQuestion, SendMessage | ✅ 完成 |
-| 任务管理 | TodoWrite, TaskManager, TaskStop | ✅ 完成 |
-| Agent 工具 | Agent, Brief, Team | ✅ 完成 |
-| 配置 | Config, PlanMode, Cron | ✅ 完成 |
-| MCP | MCP 工具和资源 | ✅ 完成 |
-| 其他 | LSP, Worktree, Skill（SKILL.md）, ToolSearch | ✅ 完成 |
+权威预期状态定义在 `src/capability_manifest.json`。确定性 reconciler 会把该声明与当前 registry、文件系统和 skill trust 证据进行比较。
+
+<!-- CAPABILITY-MANIFEST:START -->
+| Capability state | Tools | Features |
+|---|---|---|
+| Active / supported | AskUserQuestion, CronCreate, CronDelete, CronList, DataInspect, DataTransform, Edit, EnterPlanMode, EnterWorktree, ExitPlanMode, ExitWorktree, Glob, Grep, LSP, ListMcpResourcesTool, ListMcpToolsTool, MCP, NotebookEdit, Read, ReadMcpResourceTool, Skill, Sleep, StructuredOutput, TaskCreate, TaskGet, TaskList, TaskOutput, TaskStop, TaskUpdate, TodoWrite, ToolSearch, WebFetch, WebSearch, Write | agent_loop, authentication_recovery, capability_manifest, capability_reconciler, chinese_provider_ecosystem, context_engine, custom_commands_tools, data_engineering_runtime, developer_quality_tooling, enterprise_workflow_extensions, full_registered_tool_schema, git_worktree_runtime, lsp_runtime, mcp_resource_runtime, mcp_runtime, permission_contract, permission_policy_configuration, project_setup_advisor, provider_extensions, python_plugin_runtime, sanitized_runtime_instrumentation, sensitive_path_policy, skill_trust_runtime |
+| Clawd-specific | Agent, BriefPreview, GeminiThink, Memory, QwenMediaAnalyze, SendMessage, SendUserMessage, TeamCreate, TeamDelete, YouTubeAnalyze |  |
+| Intentionally disabled | Bash, Config | hook_runtime |
+| Deferred / not production-ready |  | subagent_runtime |
+<!-- CAPABILITY-MANIFEST:END -->
 
 ### 路线图进度
 
 - ✅ **阶段 0**：可安装、可运行的 CLI
 - ✅ **阶段 1**：Claude Code 核心 MVP 体验
 - ✅ **阶段 2**：真实工具调用闭环
-- 🟡 **阶段 3**：上下文、权限、恢复能力（进行中）
-- ⏳ **阶段 4**：MCP、插件、扩展性
-- ⏳ **阶段 5**：Python 原生差异化特性
+- ✅ **阶段 3**：上下文、权限、恢复能力
+- ✅ **阶段 4**：MCP、插件、扩展性
+- ✅ **阶段 5**：Python 原生差异化特性
+
+当前定义的阶段 0–5 路线图已经完成。这并不表示所有可能的 Claude Code 能力都已实现：能力清单仍是权威来源，目前 `subagent_runtime` 明确为 deferred，通用 `hook_runtime` 明确为 intentionally disabled。
 
 **详细功能状态和 PR 指南请查看 [FEATURE_LIST.md](FEATURE_LIST.md)。**
 
@@ -635,7 +678,7 @@ python -m src.cli login
 
 这个流程会：
 
-1. 让你选择 provider：anthropic / openai / glm
+1. 让你选择 provider：anthropic / openai / deepseek / qwen / glm / minimax
 2. 让你输入该 provider 的 API key
 3. 可选：保存自定义 base URL
 4. 可选：保存默认 model
@@ -660,11 +703,20 @@ python -m src.cli login
     "glm": {
       "api_key": "base64-encoded-key",
       "base_url": "https://open.bigmodel.cn/api/paas/v4",
-      "default_model": "glm-4.5"
+      "default_model": "glm-5-turbo"
     }
   }
 }
 ```
+
+#### 权限策略
+
+Clawd 在 REPL 启动时从两个 fail-closed JSON manifest 加载权限策略：
+
+- Operator policy：`~/.clawd/operator-permissions.json`
+- Repository 限制策略：`<workspace>/.clawd/permissions.json`
+
+两者都使用 `"schema_version": 1`。Operator policy 可配置 `deny_tools`、`deny_tool_prefixes`、`additional_working_directories`（必须是已存在的绝对目录）和 `allow_docs`。Repository policy 只能增加 `deny_tools` / `deny_tool_prefixes` 或将 `allow_docs` 设为 `false`；它不能增加工作目录，也不能开启文档写权限。无效或试图扩大权限的策略会阻止 REPL 启动，而不会被静默忽略。
 
 ### 运行
 
@@ -789,8 +841,8 @@ Clawd-Code/
 
 ```bash
 # 快速开发设置
-pip install -e .[dev]
-python -m pytest tests/ -v
+uv sync --locked
+uv run --locked pytest -v
 ```
 
 查看 [CONTRIBUTING.md](CONTRIBUTING.md) 了解指南。

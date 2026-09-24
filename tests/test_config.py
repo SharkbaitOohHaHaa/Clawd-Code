@@ -20,7 +20,8 @@ from src.config import (
     set_default_provider,
     get_default_provider,
     _encode_api_key,
-    _decode_api_key
+    _decode_api_key,
+    _provider_api_key_env,
 )
 
 
@@ -58,7 +59,10 @@ class TestDefaultConfig(unittest.TestCase):
         self.assertIn("providers", config)
         self.assertIn("anthropic", config["providers"])
         self.assertIn("openai", config["providers"])
+        self.assertIn("deepseek", config["providers"])
+        self.assertIn("qwen", config["providers"])
         self.assertIn("glm", config["providers"])
+        self.assertIn("minimax", config["providers"])
 
     def test_default_provider_is_anthropic(self):
         """Test that default provider is Anthropic."""
@@ -77,8 +81,20 @@ class TestDefaultConfig(unittest.TestCase):
             "gpt-5.4"
         )
         self.assertEqual(
+            config["providers"]["deepseek"]["default_model"],
+            "deepseek-flash"
+        )
+        self.assertEqual(
+            config["providers"]["qwen"]["default_model"],
+            "qwen3.8-max"
+        )
+        self.assertEqual(
             config["providers"]["glm"]["default_model"],
-            "zai/glm-5"
+            "glm-5-turbo"
+        )
+        self.assertEqual(
+            config["providers"]["minimax"]["default_model"],
+            "MiniMax-M3"
         )
 
 
@@ -223,6 +239,16 @@ class TestLoadSaveConfig(unittest.TestCase):
 class TestProviderConfig(unittest.TestCase):
     """Test provider-specific configuration."""
 
+    def test_builtin_chinese_provider_env_keys(self):
+        self.assertEqual(_provider_api_key_env("deepseek"), "DEEPSEEK_API_KEY")
+        self.assertEqual(_provider_api_key_env("qwen"), "DASHSCOPE_API_KEY")
+        self.assertEqual(_provider_api_key_env("glm"), "GLM_API_KEY")
+        self.assertEqual(_provider_api_key_env("minimax"), "MINIMAX_API_KEY")
+
+    def test_plugin_provider_env_key_is_shell_safe(self):
+        self.assertEqual(_provider_api_key_env("remote-demo"), "REMOTE_DEMO_API_KEY")
+        self.assertEqual(_provider_api_key_env("vendor.model"), "VENDOR_MODEL_API_KEY")
+
     def test_get_provider_config(self):
         """Test getting provider config."""
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -234,6 +260,114 @@ class TestProviderConfig(unittest.TestCase):
                 self.assertIn("api_key", glm_config)
                 self.assertIn("base_url", glm_config)
                 self.assertIn("default_model", glm_config)
+
+    def test_environment_api_key_overrides_stored_key(self):
+        """Test provider API keys can be supplied from the environment."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / ".clawd" / "config.json"
+
+            with patch('src.config.get_config_path', return_value=config_path):
+                set_api_key("anthropic", "stored_key")
+                with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "environment_key"}):
+                    anthropic_config = get_provider_config("anthropic")
+
+                self.assertEqual("environment_key", anthropic_config["api_key"])
+
+    def test_new_provider_can_use_environment_key_with_legacy_config(self):
+        """New registered providers work without rewriting an older config file."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / ".clawd" / "config.json"
+            config_path.parent.mkdir(parents=True, exist_ok=True)
+            config_path.write_text(
+                json.dumps({
+                    "default_provider": "anthropic",
+                    "providers": {
+                        "anthropic": {
+                            "api_key": "",
+                            "base_url": "https://api.anthropic.com",
+                            "default_model": "claude-sonnet-4-6",
+                        }
+                    },
+                }),
+                encoding="utf-8",
+            )
+
+            with patch('src.config.get_config_path', return_value=config_path), patch.dict(
+                os.environ,
+                {"DEEPSEEK_API_KEY": "environment_deepseek_key"},
+                clear=False,
+            ):
+                deepseek_config = get_provider_config("deepseek")
+
+            self.assertEqual(deepseek_config["api_key"], "environment_deepseek_key")
+            self.assertEqual(deepseek_config["base_url"], "https://api.deepseek.com")
+            self.assertEqual(deepseek_config["default_model"], "deepseek-flash")
+
+    def test_qwen_uses_dashscope_key_with_legacy_config(self):
+        """Qwen uses the Model Studio key without rewriting an older config file."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / ".clawd" / "config.json"
+            config_path.parent.mkdir(parents=True, exist_ok=True)
+            config_path.write_text(
+                json.dumps({
+                    "default_provider": "anthropic",
+                    "providers": {
+                        "anthropic": {
+                            "api_key": "",
+                            "base_url": "https://api.anthropic.com",
+                            "default_model": "claude-sonnet-4-6",
+                        }
+                    },
+                }),
+                encoding="utf-8",
+            )
+
+            with patch('src.config.get_config_path', return_value=config_path), patch.dict(
+                os.environ,
+                {"DASHSCOPE_API_KEY": "environment_qwen_key"},
+                clear=False,
+            ):
+                qwen_config = get_provider_config("qwen")
+
+            self.assertEqual(qwen_config["api_key"], "environment_qwen_key")
+            self.assertEqual(
+                qwen_config["base_url"],
+                "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+            )
+            self.assertEqual(qwen_config["default_model"], "qwen3.8-max")
+
+    def test_minimax_uses_env_key_with_legacy_config(self):
+        """MiniMax is first-class even when config predates the provider."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / ".clawd" / "config.json"
+            config_path.parent.mkdir(parents=True, exist_ok=True)
+            config_path.write_text(
+                json.dumps({
+                    "default_provider": "anthropic",
+                    "providers": {
+                        "anthropic": {
+                            "api_key": "",
+                            "base_url": "https://api.anthropic.com",
+                            "default_model": "claude-sonnet-4-6",
+                        }
+                    },
+                }),
+                encoding="utf-8",
+            )
+
+            with patch('src.config.get_config_path', return_value=config_path), patch.dict(
+                os.environ,
+                {"MINIMAX_API_KEY": "environment_minimax_key"},
+                clear=False,
+            ):
+                minimax_config = get_provider_config("minimax")
+
+            self.assertEqual(minimax_config["api_key"], "environment_minimax_key")
+            self.assertEqual(
+                minimax_config["base_url"],
+                "https://api.minimaxi.com/anthropic",
+            )
+            self.assertEqual(minimax_config["default_model"], "MiniMax-M3")
 
     def test_get_unknown_provider(self):
         """Test getting unknown provider."""

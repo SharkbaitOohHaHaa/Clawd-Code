@@ -20,6 +20,7 @@ class TaskCreateTool:
     def spec(self) -> ToolSpec:
         return ToolSpec(
             name="TaskCreate",
+            permission_policy="allow",
             description="Create a task in the task list.",
             input_schema={
                 "type": "object",
@@ -32,7 +33,7 @@ class TaskCreateTool:
                 },
                 "required": ["subject", "description"],
             },
-            is_read_only=True,
+            is_read_only=False,
             max_result_size_chars=100_000,
             strict=True,
         )
@@ -71,6 +72,7 @@ class TaskGetTool:
     def spec(self) -> ToolSpec:
         return ToolSpec(
             name="TaskGet",
+            permission_policy="allow",
             description="Retrieve a task by ID.",
             input_schema={
                 "type": "object",
@@ -109,6 +111,7 @@ class TaskListTool:
     def spec(self) -> ToolSpec:
         return ToolSpec(
             name="TaskList",
+            permission_policy="allow",
             description="List all tasks.",
             input_schema={"type": "object", "additionalProperties": False, "properties": {}},
             is_read_only=True,
@@ -136,6 +139,7 @@ class TaskUpdateTool:
     def spec(self) -> ToolSpec:
         return ToolSpec(
             name="TaskUpdate",
+            permission_policy="allow",
             description="Update a task.",
             input_schema={
                 "type": "object",
@@ -153,7 +157,7 @@ class TaskUpdateTool:
                 },
                 "required": ["taskId"],
             },
-            is_read_only=True,
+            is_read_only=False,
             max_result_size_chars=100_000,
             strict=True,
         )
@@ -232,6 +236,7 @@ class TaskOutputTool:
     def spec(self) -> ToolSpec:
         return ToolSpec(
             name="TaskOutput",
+            permission_policy="allow",
             description="Get output for a task (best-effort).",
             input_schema={
                 "type": "object",

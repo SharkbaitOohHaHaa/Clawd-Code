@@ -174,7 +174,11 @@ class InteractivePermissionHandler:
         if "allow_docs" in message.lower() or "documentation files" in message.lower():
             if hasattr(context, 'permission_context'):
                 pc = context.permission_context
-                if hasattr(pc, 'allow_docs') and not pc.allow_docs:
+                if (
+                    hasattr(pc, "allow_docs")
+                    and not pc.allow_docs
+                    and not getattr(pc, "allow_docs_locked_off", False)
+                ):
                     return "allow_docs"
         return None
 
@@ -201,6 +205,7 @@ class InteractivePermissionHandler:
                     workspace_root=pc.workspace_root,
                     additional_working_directories=pc.additional_working_directories,
                     allow_docs=True,
+                    allow_docs_locked_off=pc.allow_docs_locked_off,
                 )
                 context.permission_context = new_pc
                 self._print(f"[green]✓ {setting_name} enabled for this session[/green]")

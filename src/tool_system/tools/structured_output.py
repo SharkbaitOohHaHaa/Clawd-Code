@@ -11,6 +11,7 @@ class StructuredOutputTool:
     def spec(self) -> ToolSpec:
         return ToolSpec(
             name="StructuredOutput",
+            permission_policy="allow",
             description="Return a final response as structured JSON.",
             input_schema={"type": "object", "additionalProperties": True},
             is_read_only=True,

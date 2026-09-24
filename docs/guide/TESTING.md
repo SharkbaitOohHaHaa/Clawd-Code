@@ -6,28 +6,34 @@ This document describes the testing strategy and how to run tests for Clawd Code
 
 ```
 tests/
-├── test_agent_loop.py
-├── test_claude_code_tool_parity.py
-├── test_config.py
-├── test_context_system.py
-├── test_output_styles.py
-├── test_porting_workspace.py
-├── test_providers.py
+├── test_command_system.py
 ├── test_repl.py
-├── test_skills_system.py
-└── test_tool_system_tools.py
+├── test_compact_service.py / test_microcompact.py
+├── test_context_system.py / test_context_analyzer.py
+├── test_persistent_memory.py
+├── test_skill_trust_registry.py / test_skills_system.py
+├── test_hardening_security.py / test_session_security.py
+├── test_permissions.py / test_web_permission_security.py
+├── test_agent_loop.py / test_tool_system_tools.py
+├── test_providers.py / test_token_estimation.py
+├── test_claude_code_tool_parity.py / test_packaging_contract.py
+└── additional focused suites for activity, output styles, session security, and YouTube/Gemini
 ```
+
+## Verified Baseline
+
+The verified locked uv/pytest run is **520 passed, 3 expected Windows skips, and 69 passing subtests**. The three skips are the Windows POSIX-permission check and two Bash-specific tests because a Bash executable is unavailable in the current Windows test environment. The same repository also has a passing correctness-focused Ruff gate and a passing explicit gradual Mypy baseline.
 
 ## Running Tests
 
 ### Run All Tests
 
 ```bash
-# Activate the project environment first
-source .venv/bin/activate
+# Sync the locked developer environment once; uv run does not require activation
+uv sync --locked
 
 # Using pytest (recommended)
-python -m pytest tests/ -q
+uv run --locked pytest tests/ -q
 
 # Using unittest
 python -m unittest discover -s tests -v
@@ -37,36 +43,33 @@ python -m unittest discover -s tests -v
 
 ```bash
 # Test configuration
-python -m pytest tests/test_config.py -q
+uv run --locked pytest tests/test_config.py -q
 
 # Test providers
-python -m pytest tests/test_providers.py -q
+uv run --locked pytest tests/test_providers.py -q
 
 # Test REPL
-python -m pytest tests/test_repl.py -q
+uv run --locked pytest tests/test_repl.py -q
 
 # Test context and agent loop
-python -m pytest tests/test_context_system.py tests/test_agent_loop.py -q
+uv run --locked pytest tests/test_context_system.py tests/test_agent_loop.py -q
 ```
 
 ### Run Specific Test
 
 ```bash
 # Run specific test by name
-python -m pytest tests/test_config.py::TestLoadSaveConfig::test_save_and_load_config -v
+uv run --locked pytest tests/test_config.py::TestLoadSaveConfig::test_save_and_load_config -v
 
 # Run tests matching pattern
-python -m pytest tests/ -k "api_key" -v
+uv run --locked pytest tests/ -k "api_key" -v
 ```
 
 ### Run with Coverage
 
 ```bash
-# Install coverage tool
-uv pip install pytest-cov
-
-# Run tests with coverage report
-python -m pytest tests/ --cov=src --cov-report=html
+# Run coverage in a one-off uv overlay; pytest-cov is not a permanent project dependency
+uv run --locked --with pytest-cov pytest tests/ --cov=src --cov-report=html
 
 # Open coverage report
 open htmlcov/index.html  # macOS
@@ -167,15 +170,9 @@ def test_handle_command_multiline_toggle(self):
     assert repl.multiline_mode is False
 ```
 
-### 4. Porting Workspace Tests (`test_porting_workspace.py`)
+### 4. Security and Runtime Integration Tests
 
-Tests for porting completeness:
-
-- **Manifest**: Test file and module counts
-- **Query Engine**: Test summary generation
-- **CLI Commands**: Test command execution
-- **Parity Audit**: Test coverage verification
-- **Session Tracking**: Test turn state
+The active suite verifies command routing, session path safety, tool permissions, trust enforcement, provider behavior, output styles, context handling, and runtime tool execution. The retired standalone porting/mirroring workspace is no longer part of the supported test surface.
 
 ## Test Strategy
 
@@ -269,10 +266,10 @@ def test_openai_chat(self, mock_openai):
 
 ```bash
 # Generate coverage report
-python -m pytest tests/ --cov=src --cov-report=term-missing
+uv run --locked --with pytest-cov pytest tests/ --cov=src --cov-report=term-missing
 
 # View missing lines
-python -m pytest tests/ --cov=src --cov-report=term-missing | grep "TOTAL"
+uv run --locked --with pytest-cov pytest tests/ --cov=src --cov-report=term-missing | grep "TOTAL"
 ```
 
 ## Continuous Integration
@@ -288,8 +285,12 @@ Tests run automatically on:
 Tests are configured in `.github/workflows/` (if exists):
 
 ```yaml
+- name: Install uv
+  run: python -m pip install uv
+- name: Sync locked developer environment
+  run: uv sync --locked
 - name: Run tests
-  run: python -m pytest tests/ -q --cov=src
+  run: uv run --locked --with pytest-cov pytest tests/ -q --cov=src
 ```
 
 ## Test Data
@@ -330,20 +331,20 @@ Test sessions are created in temporary directories and cleaned up after tests.
 
 ```bash
 # Run with verbose output
-python -m pytest tests/ -v -s
+uv run --locked pytest tests/ -v -s
 
 # Run with pdb debugger
-python -m pytest tests/ --pdb
+uv run --locked pytest tests/ --pdb
 
 # Run specific failing test with output
-python -m pytest tests/test_config.py::TestClassName::test_name -v -s
+uv run --locked pytest tests/test_config.py::TestClassName::test_name -v -s
 ```
 
 ## Performance Tests
 
 ```bash
 # Run performance benchmarks
-python -m pytest tests/ --benchmark-only
+uv run --locked --with pytest-benchmark pytest tests/ --benchmark-only
 ```
 
 ## Security Tests
@@ -384,6 +385,6 @@ Good testing practices ensure:
 **Run tests before every commit!**
 
 ```bash
-source .venv/bin/activate
-python -m pytest tests/ -q
+uv sync --locked
+uv run --locked pytest tests/ -q
 ```

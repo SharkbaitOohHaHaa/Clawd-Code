@@ -8,7 +8,8 @@ from pathlib import Path
 from typing import Any, Iterable, Iterator
 
 from ..context import ToolContext
-from ..errors import ToolInputError
+from ..errors import ToolInputError, ToolPermissionError
+from ..permissions import is_sensitive_path
 from ..protocol import ToolResult
 from ..registry import ToolSpec
 
@@ -54,6 +55,7 @@ class GrepTool:
     def spec(self) -> ToolSpec:
         return ToolSpec(
             name="Grep",
+            permission_policy="self_gated",
             description="A powerful search tool built on regex search.",
             input_schema={
                 "type": "object",
@@ -117,15 +119,25 @@ class GrepTool:
         except re.error as e:
             raise ToolInputError(f"invalid regex: {e}") from e
 
-        base_path = context.cwd if base is None else context.ensure_allowed_path(base)
+        base_path = context.ensure_allowed_path(context.cwd or context.workspace_root) if base is None else context.ensure_allowed_path(base)
         if not base_path.exists():
             raise ToolInputError(f"path does not exist: {base_path}")
 
-        files_to_search: list[Path] = []
+        candidates: list[Path]
         if base_path.is_file():
-            files_to_search = [base_path]
+            candidates = [base_path]
         else:
-            files_to_search = [p for p in _iter_files(base_path) if p.is_file()]
+            candidates = [p for p in _iter_files(base_path) if p.is_file()]
+
+        files_to_search: list[Path] = []
+        for candidate in candidates:
+            try:
+                resolved = context.ensure_allowed_path(candidate)
+            except ToolPermissionError:
+                continue
+            if is_sensitive_path(resolved):
+                continue
+            files_to_search.append(resolved)
 
         if glob_pattern:
             files_to_search = [p for p in files_to_search if _matches_glob(p, glob_pattern)]

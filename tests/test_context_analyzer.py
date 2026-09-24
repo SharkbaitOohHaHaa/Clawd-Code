@@ -24,6 +24,24 @@ class TestContextWindowForModel(unittest.TestCase):
         result = get_context_window_for_model("gpt-4o")
         self.assertEqual(result, 128_000)
 
+    def test_builtin_chinese_provider_context_windows(self):
+        """Current built-in Chinese model families use explicit safe budgets."""
+        from src.context_system.context_analyzer import get_context_window_for_model
+
+        expected = {
+            "qwen3.8-max": 1_000_000,
+            "qwen3-coder-plus": 1_000_000,
+            "deepseek-flash": 1_000_000,
+            "deepseek-v4-pro": 1_000_000,
+            "glm-5.2": 200_000,
+            "glm-5-turbo": 200_000,
+            "MiniMax-M3": 1_000_000,
+            "MiniMax-M2.7": 1_000_000,
+        }
+        for model, window in expected.items():
+            with self.subTest(model=model):
+                self.assertEqual(get_context_window_for_model(model), window)
+
     def test_unknown_model_defaults(self):
         """Unknown model returns default 200k."""
         from src.context_system.context_analyzer import get_context_window_for_model

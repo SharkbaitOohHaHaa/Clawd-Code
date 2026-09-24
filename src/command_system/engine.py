@@ -224,6 +224,7 @@ def create_command_context(
     history: Any = None,
     cwd: str | Path | None = None,
     config: dict[str, Any] | None = None,
+    permission_handler: Callable[[str, str, Optional[str]], tuple[bool, bool]] | None = None,
 ) -> CommandContext:
     """
     Create a command context.
@@ -249,4 +250,5 @@ def create_command_context(
         cost_tracker=cost_tracker,
         history=history,
         config=config or {},
+        permission_handler=permission_handler,
     )

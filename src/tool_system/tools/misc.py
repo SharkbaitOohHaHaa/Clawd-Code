@@ -13,6 +13,7 @@ class SendMessageTool:
     def spec(self) -> ToolSpec:
         return ToolSpec(
             name="SendMessage",
+            permission_policy="allow",
             description="Send a message to another recipient (best-effort, local only).",
             input_schema={
                 "type": "object",
@@ -74,20 +75,6 @@ class PowerShellTool:
         if platform.system().lower() != "windows":
             return ToolResult(name="PowerShell", output={"error": "PowerShell is only supported on Windows"}, is_error=True)
         raise ToolPermissionError("PowerShell execution is not enabled in this build")
-
-
-class NotebookEditTool:
-    def spec(self) -> ToolSpec:
-        return ToolSpec(
-            name="NotebookEdit",
-            description="Edit a Jupyter notebook (not implemented).",
-            input_schema={"type": "object", "additionalProperties": True},
-            is_destructive=True,
-            max_result_size_chars=100_000,
-        )
-
-    def run(self, tool_input: dict[str, Any], context: ToolContext) -> ToolResult:
-        return ToolResult(name="NotebookEdit", output={"error": "NotebookEdit is not implemented"}, is_error=True)
 
 
 class REPLTool:

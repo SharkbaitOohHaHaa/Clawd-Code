@@ -7,6 +7,7 @@ from typing import Any
 from ..context import ToolContext
 from ..errors import ToolInputError, ToolPermissionError
 from ..permission_handler import PermissionResult
+from ..permissions import protected_write_reason, sensitive_path_permission
 from ..protocol import ToolResult
 from ..diff_utils import unified_diff_hunks
 from ..registry import ToolSpec
@@ -16,6 +17,7 @@ class FileWriteTool:
     def spec(self) -> ToolSpec:
         return ToolSpec(
             name="Write",
+            permission_policy="checked",
             description="Write a file to the local filesystem.",
             input_schema={
                 "type": "object",
@@ -41,9 +43,16 @@ class FileWriteTool:
 
         try:
             path = context.ensure_allowed_path(file_path)
-        except ToolPermissionError:
-            return PermissionResult.allow()  # Path validation happens in run()
+        except ToolPermissionError as exc:
+            return PermissionResult.deny(str(exc))
 
+        sensitive_result = sensitive_path_permission(path, operation="write")
+        if sensitive_result.behavior.value != "allow":
+            return sensitive_result
+
+        protected_reason = protected_write_reason(path, existing=path.exists())
+        if protected_reason:
+            return PermissionResult.ask(message=protected_reason)
         if path.suffix.lower() in {".md", ".markdown"} and not context.permission_context.allow_docs:
             return PermissionResult.ask(
                 message="Writing documentation files is blocked unless allow_docs is enabled",

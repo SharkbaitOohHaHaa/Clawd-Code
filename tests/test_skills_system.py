@@ -9,6 +9,7 @@ from unittest.mock import patch
 from src.skills.create import create_skill
 from src.skills.frontmatter import parse_frontmatter
 from src.skills.loader import clear_skill_registry, get_all_skills
+from src.skills.trust_registry import SkillTrustRegistry, default_skill_record
 from src.tool_system.context import ToolContext
 from src.tool_system.tools import SkillTool
 
@@ -40,6 +41,43 @@ class TestSkillCreate(SkillSystemTests):
         self.assertEqual(parsed.frontmatter["description"], "demo skill")
         self.assertEqual(parsed.frontmatter["when_to_use"], "use it when testing")
 
+    def test_parse_frontmatter_preserves_unquoted_comma_description(self) -> None:
+        parsed = parse_frontmatter(
+            "---\n"
+            "description: Review code, tests, and standards.\n"
+            "allowed-tools: Read, Grep\n"
+            "---\n"
+            "Body\n"
+        )
+        self.assertEqual(parsed.frontmatter["description"], "Review code, tests, and standards.")
+        self.assertEqual(parsed.frontmatter["allowed-tools"], ["Read", "Grep"])
+
+    def test_parse_frontmatter_preserves_quoted_comma_description(self) -> None:
+        parsed = parse_frontmatter(
+            '---\n'
+            'description: "Review code, tests, and standards."\n'
+            '---\n'
+            'Body\n'
+        )
+        self.assertEqual(parsed.frontmatter["description"], "Review code, tests, and standards.")
+
+    def test_parse_frontmatter_supports_folded_description(self) -> None:
+        parsed = parse_frontmatter(
+            "---\n"
+            "description: >-\n"
+            "  First line with context,\n"
+            "  continued on the next line.\n"
+            "allowed-tools:\n"
+            "  - Read\n"
+            "---\n"
+            "Body\n"
+        )
+        self.assertEqual(
+            parsed.frontmatter["description"],
+            "First line with context, continued on the next line.",
+        )
+        self.assertEqual(parsed.frontmatter["allowed-tools"], ["Read"])
+
     def test_parse_frontmatter_supports_inline_lists(self) -> None:
         parsed = parse_frontmatter(
             "---\n"
@@ -62,7 +100,7 @@ class TestSkillRegister(SkillSystemTests):
             body="Hello",
         )
         with patch.dict(os.environ, {"CLAWD_SKILLS_DIR": str(skills_dir)}):
-            skills = get_all_skills(project_root=self.root)
+            skills = get_all_skills(project_root=self.root, enforce_trust=False)
             by_name = {s.name: s for s in skills}
             self.assertIn("hello", by_name)
             self.assertEqual(by_name["hello"].description, "say hello")
@@ -76,12 +114,43 @@ class TestSkillUse(SkillSystemTests):
             directory=skills_dir,
             name="hello",
             description="say hello",
+            allowed_tools=["Read"],
             arguments=["name"],
             body="Hello $name ($0) / $ARGUMENTS",
         )
         ctx = ToolContext(workspace_root=self.root)
-        with patch.dict(os.environ, {"CLAWD_SKILLS_DIR": str(skills_dir)}):
+        trust_dir = self.root / "trust"
+        skill_root = skills_dir / "hello"
+        record = default_skill_record(
+            name="hello",
+            artifact_path=skill_root,
+            purpose="test prompt skill",
+        )
+        registry = SkillTrustRegistry(trust_dir)
+        registry.register_quarantined(record, initiator="test", reason="test")
+        registry.mark_reviewed(
+            "hello",
+            reviewed_by="test",
+            initiator="test",
+            reason="test review",
+        )
+        registry.approve(
+            "hello",
+            reviewed_by="test",
+            initiator="test",
+            reason="test approval",
+        )
+        registry.activate("hello", initiator="test", reason="test activation")
+
+        with patch.dict(
+            os.environ,
+            {
+                "CLAWD_SKILLS_DIR": str(skills_dir),
+                "CLAWD_SKILL_TRUST_DIR": str(trust_dir),
+            },
+        ):
             out = SkillTool().run({"skill": "hello", "args": 'bob "the builder"'}, ctx).output
             self.assertTrue(out["success"])
             self.assertIn("Hello bob (bob)", out["prompt"])
             self.assertIn('bob "the builder"', out["prompt"])
+            self.assertEqual(ctx.tool_allowlist, frozenset({"read"}))

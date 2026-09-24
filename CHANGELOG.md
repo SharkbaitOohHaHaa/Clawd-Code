@@ -8,13 +8,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- Initial context injection pipeline for workspace snapshot, git status, and `CLAUDE.md`
-- Tests covering the new context system integration
+- Bounded project-context map with source/test representation, workspace confinement, symlink avoidance, and sensitive-looking filename filtering
+- Persistent memory, context compaction, session resume, and local `/doctor` capability/trust diagnostics
+- Fail-closed operator/project permission policy and sensitive-path protections
+- Exact-hash skill/plugin trust, MCP/resource runtime, provider/workflow extensions, and sanitized runtime observability
+- Authentication recovery with explicit in-session provider reconfiguration, runtime/session/context rebinding, and no automatic retry of rejected requests
+- Python-native data/notebook tooling and locked pytest / Ruff / Mypy / uv developer quality gates
+- GitHub Actions CI across Python 3.10 / 3.11 / 3.12 with capability, full-test, Ruff, Mypy, package-build, and `twine check` gates; workflow permissions are read-only and external actions are commit-SHA pinned
 
 ### Changed
-- Skill frontmatter parsing now supports inline list syntax such as `arguments: [path]`
-- README and contributor docs now prefer `uv`-based setup instructions
-- Documentation now distinguishes provider-level streaming interfaces from the current turn-based CLI output
+- Current scoped Phase 0–5 roadmap is complete; `subagent_runtime` remains explicitly deferred and generic `hook_runtime` intentionally disabled
+- Capability status documentation now renders feature states as well as tool states
+- Package description no longer claims a complete drop-in replacement experience
+- Source-distribution manifest no longer references nonexistent `CLAUDE.md` or `MVP_PLAN.md`
+- Skill frontmatter parsing supports inline list syntax such as `arguments: [path]`
+- README and contributor docs prefer `uv`-based setup instructions
+- Direct/provider streaming and agent-loop behavior are documented according to the current runtime
+
+### Security
+- Authentication failures are classified without vendor-SDK coupling and user-facing recovery output does not echo provider exception text
+- Unanswered authentication-rejected turns are removed from conversation state; turns with visible/assistant/tool activity are preserved for review
 
 ## [0.1.0] - 2026-04-01
 

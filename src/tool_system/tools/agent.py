@@ -15,6 +15,7 @@ class AgentTool:
     def spec(self) -> ToolSpec:
         return ToolSpec(
             name="Agent",
+            permission_policy="delegated",
             description="Execute a sequence of tool calls as a single atomic agent step.",
             input_schema={
                 "type": "object",

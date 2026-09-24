@@ -6,6 +6,8 @@ from typing import Any
 
 from ..context import ToolContext
 from ..errors import ToolInputError, ToolPermissionError
+from ..permission_handler import PermissionResult
+from ..permissions import protected_write_reason, sensitive_path_permission
 from ..protocol import ToolResult
 from ..registry import ToolSpec
 
@@ -14,9 +16,10 @@ class EnterPlanModeTool:
     def spec(self) -> ToolSpec:
         return ToolSpec(
             name="EnterPlanMode",
+            permission_policy="allow",
             description="Enter plan mode (exploration/planning phase).",
             input_schema={"type": "object", "additionalProperties": False, "properties": {}},
-            is_read_only=True,
+            is_read_only=False,
             max_result_size_chars=100_000,
             strict=True,
         )
@@ -32,9 +35,43 @@ class EnterPlanModeTool:
 
 
 class ExitPlanModeTool:
+    def check_permissions(
+        self, tool_input: dict[str, Any], context: ToolContext
+    ) -> PermissionResult:
+        plan = tool_input.get("plan")
+        if plan is None:
+            return PermissionResult.allow()
+        plan_path = tool_input.get("planFilePath")
+        if plan_path is not None and not isinstance(plan_path, str):
+            return PermissionResult.allow()
+        try:
+            if plan_path:
+                target = Path(plan_path).expanduser()
+                if not target.is_absolute():
+                    target = (context.cwd or context.workspace_root) / target
+                target = context.ensure_allowed_path(target)
+            else:
+                target = context.ensure_allowed_path(context.workspace_root / ".clawd" / "plan.md")
+        except ToolPermissionError as exc:
+            return PermissionResult.deny(str(exc))
+
+        sensitive_result = sensitive_path_permission(target, operation="write")
+        if sensitive_result.behavior.value != "allow":
+            return sensitive_result
+        protected_reason = protected_write_reason(target, existing=target.exists())
+        if protected_reason:
+            return PermissionResult.ask(protected_reason)
+        if target.suffix.lower() in {".md", ".markdown"} and not context.permission_context.allow_docs:
+            return PermissionResult.ask(
+                "Writing plan documentation requires confirmation unless allow_docs is enabled",
+                "Enable allow_docs to persist plan files without prompting",
+            )
+        return PermissionResult.allow()
+
     def spec(self) -> ToolSpec:
         return ToolSpec(
             name="ExitPlanMode",
+            permission_policy="checked",
             description="Exit plan mode after writing a plan; may persist plan to disk.",
             input_schema={
                 "type": "object",

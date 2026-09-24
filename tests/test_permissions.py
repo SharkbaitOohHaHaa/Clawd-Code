@@ -8,7 +8,11 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 from src.tool_system.context import ToolContext
-from src.tool_system.permission_handler import PermissionBehavior, PermissionResult
+from src.tool_system.permission_handler import (
+    InteractivePermissionHandler,
+    PermissionBehavior,
+    PermissionResult,
+)
 from src.tool_system.permissions import ToolPermissionContext
 from src.tool_system.protocol import ToolCall
 from src.tool_system.registry import ToolRegistry
@@ -220,6 +224,21 @@ class TestToolRegistryDispatchPermissions(unittest.TestCase):
 
         self.assertFalse(result.is_error)
         self.assertEqual(result.output.get("type"), "create")
+
+
+class TestInteractivePermissionHandler(unittest.TestCase):
+    def test_project_lock_prevents_session_enable(self) -> None:
+        ctx = ToolContext(workspace_root=Path.cwd())
+        ctx.permission_context.allow_docs = False
+        ctx.permission_context.allow_docs_locked_off = True
+        handler = InteractivePermissionHandler(prompt_func=lambda _: "e")
+        request = PermissionResult.ask(
+            "Writing documentation files is blocked unless allow_docs is enabled"
+        )
+
+        self.assertIsNone(handler._can_enable_setting(request, ctx))
+        handler._enable_setting(request, ctx)
+        self.assertFalse(ctx.permission_context.allow_docs)
 
 
 class TestPermissionContext(unittest.TestCase):

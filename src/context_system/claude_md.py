@@ -30,6 +30,8 @@ def load_claude_md_context(
     for base in _walk_up_to_root(current, root):
         for rel in _PROJECT_CANDIDATES:
             path = (base / rel).resolve()
+            if not _is_within(path, root):
+                continue
             if path not in candidates:
                 candidates.append(path)
 
@@ -85,3 +87,11 @@ def _walk_up_to_root(current: Path, root: Path) -> list[Path]:
             break
         node = parent
     return bases
+
+
+def _is_within(child: Path, parent: Path) -> bool:
+    try:
+        child.relative_to(parent)
+        return True
+    except ValueError:
+        return False

@@ -5,7 +5,8 @@ from pathlib import Path
 from typing import Any
 
 from ..context import ToolContext
-from ..errors import ToolInputError
+from ..errors import ToolInputError, ToolPermissionError
+from ..permissions import is_sensitive_path
 from ..protocol import ToolResult
 from ..registry import ToolSpec
 
@@ -14,6 +15,7 @@ class GlobTool:
     def spec(self) -> ToolSpec:
         return ToolSpec(
             name="Glob",
+            permission_policy="self_gated",
             description=(
                 "- Fast file pattern matching tool that works with any codebase size\n"
                 '- Supports glob patterns like "**/*.js" or "src/**/*.ts"\n'
@@ -44,7 +46,7 @@ class GlobTool:
         if not isinstance(limit, int) or limit < 1 or limit > 10_000:
             raise ToolInputError("limit must be an integer between 1 and 10000")
 
-        base_dir = context.cwd if base is None else context.ensure_allowed_path(base)
+        base_dir = context.ensure_allowed_path(context.cwd or context.workspace_root) if base is None else context.ensure_allowed_path(base)
         if not base_dir.exists():
             raise ToolInputError(f"path does not exist: {base_dir}")
         if not base_dir.is_dir():
@@ -52,7 +54,17 @@ class GlobTool:
 
         full_pattern = str(base_dir / pattern)
         matches = [Path(p) for p in globlib.glob(full_pattern, recursive=True)]
-        files = [p for p in matches if p.is_file()]
+        files: list[Path] = []
+        for match in matches:
+            if not match.is_file():
+                continue
+            try:
+                resolved = context.ensure_allowed_path(match)
+            except ToolPermissionError:
+                continue
+            if is_sensitive_path(resolved):
+                continue
+            files.append(resolved)
 
         files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
         truncated = len(files) > limit

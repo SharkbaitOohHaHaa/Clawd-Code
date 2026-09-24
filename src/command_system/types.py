@@ -54,6 +54,7 @@ class CommandContext:
     cost_tracker: Any
     history: Any
     config: dict[str, Any] = field(default_factory=dict)
+    permission_handler: Callable[[str, str, Optional[str]], tuple[bool, bool]] | None = None
 
 
 # Protocol for local command callables

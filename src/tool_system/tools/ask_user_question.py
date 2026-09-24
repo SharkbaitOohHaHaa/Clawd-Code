@@ -12,6 +12,7 @@ class AskUserQuestionTool:
     def spec(self) -> ToolSpec:
         return ToolSpec(
             name="AskUserQuestion",
+            permission_policy="allow",
             description="Ask the user one or more multiple-choice questions.",
             input_schema={
                 "type": "object",

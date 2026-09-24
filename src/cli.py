@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import sys
-from pathlib import Path
 
 from rich.console import Console
 from rich.prompt import Prompt
@@ -78,11 +77,30 @@ Examples:
     return start_repl(stream=args.stream)
 
 
+def _bootstrap_plugin_providers() -> list[dict[str, str]]:
+    """Load exact-hash active plugin provider metadata without contacting providers."""
+    from src.plugins.extensions import (
+        load_active_plugin_extensions,
+        register_plugin_provider_extensions,
+    )
+
+    load_result = load_active_plugin_extensions()
+    return [
+        *load_result.issues,
+        *register_plugin_provider_extensions(load_result),
+    ]
+
+
 def _show_provider_defaults_table() -> None:
     """Print a table showing available providers and their defaults."""
-    from src.providers import PROVIDER_INFO
-
     console = Console()
+    plugin_issues = _bootstrap_plugin_providers()
+    if plugin_issues:
+        console.print(
+            "[yellow]Some trusted plugin providers are unavailable; "
+            "start Clawd with a built-in provider and run /doctor for details.[/yellow]"
+        )
+    from src.providers import PROVIDER_INFO
     table = Table(title="Available Providers & Defaults", show_header=True, header_style="bold")
     table.add_column("Provider", style="cyan")
     table.add_column("Default Model", style="magenta")
@@ -119,15 +137,19 @@ def handle_login():
 
     info = PROVIDER_INFO[provider]
 
-    # Input API Key
-    api_key = Prompt.ask(
-        f"Enter {provider.upper()} API Key",
-        password=True
-    )
-
-    if not api_key:
-        console.print("\n[red]Error: API Key cannot be empty[/red]")
-        return 1
+    # Input API key only when the selected provider requires one.
+    requires_api_key = info.get("requires_api_key", True)
+    api_key = ""
+    if requires_api_key:
+        api_key = Prompt.ask(
+            f"Enter {provider.upper()} API Key",
+            password=True
+        )
+        if not api_key:
+            console.print("\n[red]Error: API Key cannot be empty[/red]")
+            return 1
+    else:
+        console.print("\n[dim]This local-only provider does not require an API key.[/dim]")
 
     # Optional: Base URL (show default)
     console.print(f"\n[dim]Default:[/dim] {info['default_base_url']}")
@@ -144,14 +166,32 @@ def handle_login():
         default=info["default_model"]
     )
 
+    # Validate provider policy before persisting configuration.
+    from src.providers import validate_provider_runtime_config
+    try:
+        validate_provider_runtime_config(
+            provider,
+            {
+                "api_key": api_key,
+                "base_url": base_url,
+                "default_model": default_model,
+            },
+        )
+    except ValueError as exc:
+        console.print(f"\n[red]Error: {exc}[/red]")
+        return 1
+
     # Save configuration
     from src.config import set_api_key, set_default_provider
 
     set_api_key(provider, api_key=api_key, base_url=base_url, default_model=default_model)
     set_default_provider(provider)
 
-    console.print(f"\n[green]✓ {provider.upper()} API Key saved successfully![/green]")
-    console.print(f"[green]✓ Default provider set to: {provider}[/green]\n")
+    if requires_api_key:
+        console.print(f"\n[green]{provider.upper()} API key saved successfully.[/green]")
+    else:
+        console.print(f"\n[green]{provider.upper()} local provider configuration saved.[/green]")
+    console.print(f"[green]Default provider set to: {provider}[/green]\n")
     return 0
 
 
@@ -193,9 +233,10 @@ def show_config():
 
 def start_repl(stream: bool = False):
     """Start interactive REPL."""
-    from src.config import get_default_provider
+    from src.config import get_default_provider, load_secrets_env
     from src.repl import ClawdREPL
 
+    load_secrets_env()
     provider = get_default_provider()
     repl = ClawdREPL(provider_name=provider, stream=stream)
     repl.run()

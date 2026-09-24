@@ -2,11 +2,15 @@
 anthropic>=0.18.0
 openai>=1.0.0
 zhipuai>=2.0.0
-python-dotenv>=1.0.0
+google-auth[requests]>=2.0.0
+google-auth-oauthlib>=1.2.0
 rich>=13.0.0
 prompt-toolkit>=3.0.0
+tiktoken>=0.7.0
 
 # Development Dependencies
 build>=1.0.0
 twine>=5.0.0
 pytest>=8.0.0
+ruff>=0.16.8
+mypy>=2.3.1

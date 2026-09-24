@@ -64,6 +64,7 @@ class CompactResult:
     summary_text: str
     trigger: str = "manual"
     user_display_message: Optional[str] = None
+    usage: dict[str, int] | None = None
 
 
 async def compact_conversation(
@@ -132,6 +133,7 @@ async def compact_conversation(
 
     # Step 5: Call the LLM to generate summary
     summary_text = ""
+    response_usage: dict[str, int] = {}
     try:
         response = await provider.chat_async(
             messages=summary_request_messages,
@@ -140,6 +142,8 @@ async def compact_conversation(
             max_tokens=COMPACT_MAX_OUTPUT_TOKENS,
         )
         summary_text = response.content.strip()
+        if isinstance(getattr(response, "usage", None), dict):
+            response_usage = dict(response.usage)
     except Exception as e:
         # Try sync fallback
         try:
@@ -150,6 +154,8 @@ async def compact_conversation(
                 max_tokens=COMPACT_MAX_OUTPUT_TOKENS,
             )
             summary_text = response.content.strip()
+            if isinstance(getattr(response, "usage", None), dict):
+                response_usage = dict(response.usage)
         except Exception as e2:
             logger.warning(f"Compact LLM call failed: {e}, sync fallback: {e2}, using text extraction")
             summary_text = _fallback_summary(messages)
@@ -219,6 +225,7 @@ async def compact_conversation(
         summary_text=summary_text,
         trigger=trigger,
         user_display_message=user_display,
+        usage=response_usage or None,
     )
 
 

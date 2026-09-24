@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from .models import WorkspaceSnapshot
+from .project_map import is_sensitive_context_name
 
 _IGNORED_NAMES = {
     ".git",
@@ -41,7 +42,7 @@ def build_workspace_snapshot(
     except Exception:
         children = []
     for child in children:
-        if child.name in _IGNORED_NAMES:
+        if child.name in _IGNORED_NAMES or is_sensitive_context_name(child.name):
             continue
         marker = "/" if child.is_dir() else ""
         entries.append(f"{child.name}{marker}")

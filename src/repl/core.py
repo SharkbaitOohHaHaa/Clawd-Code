@@ -75,26 +75,97 @@ from typing import Any
 from src.agent import Session
 from src.config import get_provider_config
 from src.outputStyles import resolve_output_style
-from src.providers import get_provider_class
+from src.providers import (
+    get_provider_class,
+    get_provider_info,
+    validate_provider_runtime_config,
+)
 from src.providers.anthropic_provider import AnthropicProvider
 from src.providers.base import ChatMessage
 from src.providers.minimax_provider import MinimaxProvider
 from src.tool_system.context import ToolContext
 from src.tool_system.defaults import build_default_registry
+from src.tool_system.mcp_resource_runtime import MCPResourceConfigError, load_mcp_resource_clients
+from src.tool_system.permission_policy import PermissionPolicyConfigError, load_permission_context
 from src.tool_system.protocol import ToolCall
-from src.tool_system.agent_loop import ToolEvent, run_agent_loop, summarize_tool_result, summarize_tool_use
+from src.tool_system.agent_loop import (
+    ToolEvent,
+    build_agent_preflight,
+    run_agent_loop,
+    summarize_tool_result,
+    summarize_tool_use,
+)
 
 # New command system imports
 from src.command_system import (
     CommandRegistry,
     CommandResult,
+    PromptCommand,
     create_command_context,
     execute_command_async,
     execute_command_sync,
+    get_command_registry,
     register_builtin_commands,
+)
+from src.plugins.extensions import (
+    clear_registered_plugin_commands,
+    load_active_plugin_extensions,
+    register_plugin_extensions,
+    register_plugin_provider_extensions,
 )
 from src.cost_tracker import CostTracker
 from src.history import HistoryLog
+from src.usage_ledger import append_provider_usage
+
+
+_AUTH_ERROR_MESSAGE_MARKERS = (
+    "401",
+    "authentication error",
+    "authentication failed",
+    "invalid authentication",
+    "unauthorized",
+    "unauthenticated",
+    "invalid api key",
+    "incorrect api key",
+    "api key is invalid",
+    "api key invalid",
+    "expired api key",
+    "api key has expired",
+    "invalid access token",
+    "invalid token",
+    "认证失败",
+    "身份验证失败",
+    "令牌无效",
+)
+
+
+def _is_provider_authentication_error(error: BaseException) -> bool:
+    """Classify provider authentication failures without vendor-SDK coupling."""
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+
+        class_name = type(current).__name__.lower()
+        if "authenticationerror" in class_name or "unauthorizederror" in class_name:
+            return True
+
+        status_code = getattr(current, "status_code", None)
+        response = getattr(current, "response", None)
+        if status_code is None and response is not None:
+            status_code = getattr(response, "status_code", None)
+        try:
+            if int(status_code) == 401:
+                return True
+        except (TypeError, ValueError):
+            pass
+
+        message = str(current).lower()
+        if any(marker in message for marker in _AUTH_ERROR_MESSAGE_MARKERS):
+            return True
+
+        current = current.__cause__ or current.__context__
+    return False
 
 
 class ClawdREPL:
@@ -106,11 +177,37 @@ class ClawdREPL:
         self.stream = stream
         self.multiline_mode = False
 
+        # Load exact-hash active plugin providers before provider resolution.
+        # Reuse this same imported result later for command/tool registration.
+        self._plugin_extension_load_result = load_active_plugin_extensions()
+        provider_registration_issues = register_plugin_provider_extensions(
+            self._plugin_extension_load_result
+        )
+        self._plugin_provider_issues = [
+            *self._plugin_extension_load_result.issues,
+            *provider_registration_issues,
+        ]
+
         # Load configuration
-        config = get_provider_config(provider_name)
-        if not config.get("api_key"):
+        try:
+            info = get_provider_info(provider_name)
+            config = get_provider_config(provider_name)
+        except ValueError as exc:
+            self.console.print(f"[red]Error: {exc}[/red]")
+            if self._plugin_provider_issues:
+                self.console.print(
+                    "[yellow]A trusted plugin extension is unavailable; "
+                    "start with a built-in provider and run /doctor for details.[/yellow]"
+                )
+            sys.exit(1)
+        if info.get("requires_api_key", True) and not config.get("api_key"):
             self.console.print("[red]Error: API key not configured.[/red]")
             self.console.print("Run [bold]clawd login[/bold] to configure.")
+            sys.exit(1)
+        try:
+            validate_provider_runtime_config(provider_name, config)
+        except ValueError as exc:
+            self.console.print(f"[red]Error: {exc}[/red]")
             sys.exit(1)
 
         # Initialize provider
@@ -128,34 +225,85 @@ class ClawdREPL:
         )
 
         self.tool_registry = build_default_registry()
-        self.tool_context = ToolContext(workspace_root=Path.cwd())
+        workspace_root = Path.cwd()
+        try:
+            permission_context = load_permission_context(workspace_root)
+        except PermissionPolicyConfigError as exc:
+            self.console.print(f"[red]Error: invalid permission policy: {exc}[/red]")
+            sys.exit(1)
+        self.tool_context = ToolContext(
+            workspace_root=workspace_root,
+            permission_context=permission_context,
+            instrumentation_enabled=True,
+        )
+        try:
+            self.tool_context.mcp_clients = load_mcp_resource_clients()
+        except MCPResourceConfigError as exc:
+            self.tool_context.mcp_config_error = str(exc)
         self.tool_context.ask_user = self._ask_user_questions
         # Permission handler with status control for proper input handling
         self._current_status = None
         self.tool_context.permission_handler = self._handle_permission_request
 
-        # Original built-in commands - define this FIRST!
-        self._original_built_ins = [
-            "/",
-            "/help",
-            "/exit",
-            "/quit",
-            "/q",
-            "/clear",
-            "/save",
-            "/load",
-            "/multiline",
-            "/stream",
-            "/render-last",
-            "/tools",
-            "/tool",
-            "/skills",
-            "/init",
+        # User-facing commands: clear names, grouped by purpose.
+        self._visible_command_groups = [
+            ("General", [
+                ("/help", "Show command help"),
+                ("/exit", "Exit JR"),
+            ]),
+            ("Conversation & Sessions", [
+                ("/clear-chat", "Clear the current conversation"),
+                ("/save-session", "Save the current session"),
+                ("/load-session", "Load a saved session by ID"),
+                ("/resume", "Choose and resume a recent saved session"),
+                ("/compact-context", "Compact the conversation to save context space"),
+                ("/context-usage", "Show context-window usage and breakdown"),
+            ]),
+            ("Input & Display", [
+                ("/multiline-input", "Toggle multiline input mode"),
+                ("/stream-responses", "Control live response streaming"),
+                ("/render-last-response", "Re-render the last assistant response"),
+            ]),
+            ("Usage", [
+                ("/usage", "Show API/model usage plus skill and tool activity"),
+                ("/session-usage", "Show tokens JR tracked in this session"),
+            ]),
+            ("Tools & Project", [
+                ("/list-tools", "List available built-in tools"),
+                ("/run-tool", "Run a tool directly"),
+                ("/list-skills", "List available skills"),
+                ("/setup-project", "Set up CLAUDE.md and optional skills"),
+                ("/doctor", "Run local health and capability diagnostics"),
+            ]),
         ]
+        self._original_built_ins = [
+            name
+            for _, commands in self._visible_command_groups
+            for name, _ in commands
+        ]
+        # Visible canonical names route to their established implementation command names.
+        # Compatibility aliases remain registered separately and stay out of the palette.
+        self._canonical_command_routes = {
+            "save-session": "save",
+            "load-session": "load",
+            "multiline-input": "multiline",
+            "stream-responses": "stream",
+            "render-last-response": "render-last",
+            "list-tools": "tools",
+            "run-tool": "tool",
+            "context-usage": "context",
+            "compact-context": "compact",
+            "setup-project": "init",
+        }
+        self._legacy_hidden_commands = {
+            "save", "load", "multiline", "stream", "render-last", "tools", "tool"
+        }
         self._built_in_commands = list(self._original_built_ins)
 
         # Initialize new command system
         self._init_command_system()
+        self._init_plugin_extensions()
+        self._update_built_in_commands_with_command_system()
 
         # Prompt toolkit with tab completion
         history_file = Path.home() / ".clawd" / "history"
@@ -282,9 +430,15 @@ class ClawdREPL:
         msg_lower = message.lower()
         if "allow_docs" in msg_lower or "documentation files" in msg_lower:
             pc = self.tool_context.permission_context
-            if hasattr(pc, 'allow_docs') and not pc.allow_docs:
+            if (
+                hasattr(pc, "allow_docs")
+                and not pc.allow_docs
+                and not getattr(pc, "allow_docs_locked_off", False)
+            ):
                 can_enable_setting = True
                 setting_to_enable = "allow_docs"
+
+        require_explicit_yes = suggestion == "require-explicit-yes"
 
         # Build options
         options: list[tuple[str, str]] = [
@@ -308,13 +462,21 @@ class ClawdREPL:
             if choice in ("1", "e", "enable"):
                 self._enable_permission_setting(setting_to_enable)
                 return True, False
-            elif choice in ("2", "y", "yes", ""):
+            elif choice in (
+                ("2", "y", "yes")
+                if require_explicit_yes
+                else ("2", "y", "yes", "")
+            ):
                 return True, False
             elif choice in ("3", "n", "no"):
                 return False, False
         else:
             # Menu: 1=Yes, 2=No
-            if choice in ("1", "y", "yes", ""):
+            if choice in (
+                ("1", "y", "yes")
+                if require_explicit_yes
+                else ("1", "y", "yes", "")
+            ):
                 return True, False
             elif choice in ("2", "n", "no"):
                 return False, False
@@ -332,7 +494,9 @@ class ClawdREPL:
 
         if setting_name == "allow_docs":
             pc = self.tool_context.permission_context
-            if hasattr(pc, 'allow_docs'):
+            if getattr(pc, "allow_docs_locked_off", False):
+                return
+            if hasattr(pc, "allow_docs"):
                 pc.allow_docs = True
                 self.console.print(f"[green]✓ {setting_name} enabled for this session[/green]")
                 return
@@ -358,27 +522,54 @@ class ClawdREPL:
             conversation=self.session.conversation,
             cost_tracker=self.cost_tracker,
             history=self.history_log,
+            config={
+                "context_provider": self.provider,
+                "context_tool_registry": self.tool_registry,
+                "context_tool_context": self.tool_context,
+            },
+            permission_handler=self._handle_permission_request,
         )
 
         # Merge new commands with built-in list for completion
         self._update_built_in_commands_with_command_system()
+
+    def _init_plugin_extensions(self) -> None:
+        """Load exact-hash active plugin commands/tools into existing registries."""
+        global_registry = get_command_registry()
+        clear_registered_plugin_commands(global_registry)
+
+        load_result = getattr(self, "_plugin_extension_load_result", None)
+        if load_result is None:
+            load_result = load_active_plugin_extensions()
+            self._plugin_extension_load_result = load_result
+        provider_issues = getattr(self, "_plugin_provider_issues", [])
+        issues = register_plugin_extensions(
+            load_result,
+            tool_registry=self.tool_registry,
+            command_registries=(global_registry, self.command_registry),
+        )
+        combined = [*provider_issues, *issues]
+        deduped: list[dict[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        for issue in combined:
+            key = (str(issue.get("code") or ""), str(issue.get("subject") or ""))
+            if key not in seen:
+                deduped.append(issue)
+                seen.add(key)
+        self.plugin_extension_issues = deduped
+        self.command_context.config["plugin_runtime_issues"] = list(deduped)
 
     def _update_built_in_commands_with_command_system(self):
         """Update the built-in commands list with commands from the new system."""
         # Start with original built-ins
         self._built_in_commands = list(self._original_built_ins)
 
-        # Add commands from the new command system
+        # Add canonical commands only. Compatibility aliases still execute but do not clutter completion.
         try:
             for cmd in self.command_registry.list_commands():
                 cmd_name = f"/{cmd.name}"
                 if cmd_name not in self._built_in_commands:
                     self._built_in_commands.append(cmd_name)
-                # Add aliases
-                for alias in cmd.aliases:
-                    alias_name = f"/{alias}"
-                    if alias_name not in self._built_in_commands:
-                        self._built_in_commands.append(alias_name)
         except Exception:
             pass
 
@@ -435,10 +626,17 @@ class ClawdREPL:
                     break
 
             if prompt_text:
-                # Send the prompt to the LLM for interactive execution
-                # Use higher max_turns for complex commands like /init
-                self.console.print("[dim]Initializing workspace setup...[/dim]")
-                self.chat(prompt_text, max_turns=100)
+                command = self.command_registry.get(result.command_name)
+                previous_tool_allowlist = self.tool_context.tool_allowlist
+                if isinstance(command, PromptCommand) and command.allowed_tools:
+                    self.tool_context.restrict_tool_allowlist(command.allowed_tools)
+                try:
+                    if result.command_name == "init":
+                        self.console.print("[dim]Initializing workspace setup...[/dim]")
+                    # Send the prompt to the LLM for interactive execution.
+                    self.chat(prompt_text, max_turns=100)
+                finally:
+                    self.tool_context.tool_allowlist = previous_tool_allowlist
             return True
 
         elif result.result_type == "skip":
@@ -453,7 +651,8 @@ class ClawdREPL:
             from src.skills.loader import get_all_skills
 
             cwd = self.tool_context.cwd or self.tool_context.workspace_root
-            for s in get_all_skills(project_root=cwd):
+            skills = sorted(get_all_skills(project_root=cwd), key=lambda s: s.name.lower())
+            for s in skills:
                 words.append(f"/{s.name}")
         except Exception:
             pass
@@ -484,60 +683,62 @@ class ClawdREPL:
         q = (query or "").strip().lower()
         self.console.print("\n[bold]Available commands and skills:[/bold]")
 
-        # Collect all commands
-        all_commands: list[tuple[str, str, str]] = []  # (name, description, type)
-        seen: set[str] = set()
-
-        def add_command(name: str, desc: str, cmd_type: str = "command") -> None:
-            if name in seen:
-                return
-            seen.add(name)
-            if q and q not in name.lower() and q not in desc.lower():
-                return
-            all_commands.append((name, desc, cmd_type))
-
-        # Add built-in commands
-        for cmd in self._original_built_ins:
-            if cmd == "/":
+        visible_names: set[str] = set()
+        for group_name, commands in self._visible_command_groups:
+            matches = [
+                (name, desc)
+                for name, desc in commands
+                if not q or q in name.lower() or q in desc.lower()
+            ]
+            if not matches:
                 continue
-            add_command(cmd, "", "command")
+            self.console.print(f"\n[cyan]{group_name}[/cyan]")
+            for name, desc in matches:
+                visible_names.add(name.lower())
+                self.console.print(f"  {name}  [dim]- {desc}[/dim]")
 
-        # Add commands from new command system
+        # Preserve any future canonical command-system entries without mixing in aliases.
+        other_commands: list[tuple[str, str]] = []
         try:
             for cmd in self.command_registry.list_commands():
-                cmd_name = f"/{cmd.name}"
-                if cmd_name in self._original_built_ins:
+                name = f"/{cmd.name}"
+                if name.lower() in visible_names:
                     continue
-                alias_str = f" (aliases: {', '.join(cmd.aliases)})" if cmd.aliases else ""
-                add_command(f"{cmd_name}{alias_str}", cmd.description, "command")
+                desc = (cmd.description or "").strip()
+                if q and q not in name.lower() and q not in desc.lower():
+                    continue
+                other_commands.append((name, desc))
         except Exception:
             pass
 
-        # Add skills
-        try:
-            from src.skills.loader import get_all_skills
+        if other_commands:
+            self.console.print("\n[cyan]Other Commands[/cyan]")
+            for name, desc in sorted(other_commands, key=lambda item: item[0].lower()):
+                self.console.print(f"  {name}  [dim]- {desc}[/dim]")
 
-            cwd = self.tool_context.cwd or self.tool_context.workspace_root
-            skills = list(get_all_skills(project_root=cwd))
-            skills.sort(key=lambda s: s.name.lower())
-            for s in skills:
-                desc = (s.description or "").strip()
-                add_command(f"/{s.name}", desc, "skill")
-        except Exception:
-            pass
+        if self.tool_registry.get("Skill") is not None:
+            try:
+                from src.skills.loader import get_all_skills
 
-        # Sort and display
-        all_commands.sort(key=lambda x: x[0].lower())
-        for name, desc, cmd_type in all_commands:
-            if cmd_type == "skill":
-                self.console.print(f"  [magenta]{name}[/magenta]")
-                if desc:
-                    self.console.print(f"    [dim]{desc}[/dim]")
-            else:
-                if desc:
-                    self.console.print(f"  {name}  [dim]- {desc}[/dim]")
-                else:
-                    self.console.print(f"  {name}")
+                cwd = self.tool_context.cwd or self.tool_context.workspace_root
+                skills = list(get_all_skills(project_root=cwd))
+                skills.sort(key=lambda s: s.name.lower())
+                skill_matches = []
+                for skill in skills:
+                    name = f"/{skill.name}"
+                    desc = (skill.description or "").strip()
+                    if q and q not in name.lower() and q not in desc.lower():
+                        continue
+                    skill_matches.append((name, desc))
+
+                if skill_matches:
+                    self.console.print("\n[magenta]Skills[/magenta]")
+                    for name, desc in skill_matches:
+                        self.console.print(f"  [magenta]{name}[/magenta]")
+                        if desc:
+                            self.console.print(f"    [dim]{desc}[/dim]")
+            except Exception:
+                pass
 
         self.console.print()
 
@@ -598,7 +799,7 @@ class ClawdREPL:
         table.add_row("Provider", Text(provider_label, style="bold green"))
         table.add_row("Workspace", Text(self._truncate_middle(display_path, content_width - 12), style="bold blue"))
 
-        footer = Text("/help  •  /tools  •  /stream  •  /render-last  •  /exit", style="dim")
+        footer = Text("/help  •  /list-tools  •  /list-skills  •  /clear-chat  •  /save-session /resume  •  /exit", style="dim")
         mascot_block = Text(mascot_ascii, style="bold orange3", no_wrap=True)
         body = Group(
             Columns([mascot_block, table], align="center", expand=False),
@@ -609,7 +810,6 @@ class ClawdREPL:
             body,
             border_style="bright_black",
             title="[bold bright_cyan] CLAWD CODE [/bold bright_cyan]",
-            subtitle="[dim]interactive terminal[/dim]",
             padding=(1, 2),
         )
         self.console.print(header)
@@ -657,17 +857,24 @@ class ClawdREPL:
         if raw == "/":
             self._show_slash_palette()
             return
-        if raw.startswith("/") and " " not in raw and raw.lower() not in (c.lower() for c in self._built_in_commands):
-            query = raw[1:]
-            if query:
-                self._show_slash_palette(query=query)
-                return
+        if raw.startswith("/") and " " not in raw:
+            raw_name = raw[1:].lower()
+            visible = raw.lower() in (c.lower() for c in self._built_in_commands)
+            registered = self.command_registry.has(raw_name)
+            legacy = raw_name in self._legacy_hidden_commands
+            if not (visible or registered or legacy):
+                if raw_name:
+                    self._show_slash_palette(query=raw_name)
+                    return
 
         # First, try the new command system
         if raw.startswith("/"):
             parts = raw[1:].split(maxsplit=1)
-            cmd_name = parts[0].lower()
+            typed_cmd_name = parts[0].lower()
             args = parts[1] if len(parts) > 1 else ""
+            cmd_name = self._canonical_command_routes.get(typed_cmd_name, typed_cmd_name)
+            if cmd_name != typed_cmd_name:
+                raw = f"/{cmd_name}" + (f" {args}" if args else "")
 
             # Check if this command exists in the new command system
             # but skip the ones we handle specially
@@ -676,7 +883,7 @@ class ClawdREPL:
             special_commands = {
                 'exit', 'quit', 'q',
                 'help', 'tools', 'tool',
-                'save', 'load', 'multiline', 'stream', 'render-last',
+                'save', 'load', 'resume', 'multiline', 'stream', 'render-last',
                 'skill',
                 'context', 'compact',  # These need special handling
                 ''
@@ -700,7 +907,7 @@ class ClawdREPL:
                     elif result.error:
                         self.console.print(f"[red]{result.error}[/red]")
                 except Exception as e:
-                    self.console.print(f"[red]Error executing /init: {e}[/red]")
+                    self.console.print(f"[red]Error executing /setup-project: {e}[/red]")
                 return
 
             if cmd_name not in special_commands:
@@ -755,7 +962,7 @@ class ClawdREPL:
         elif cmd.startswith('/tool'):
             parts = command.strip().split(maxsplit=2)
             if len(parts) < 2:
-                self.console.print("[red]Usage: /tool <name> <json-input>[/red]")
+                self.console.print("[red]Usage: /run-tool <name> <json-input>[/red]")
                 return
             name = parts[1]
             payload = {}
@@ -765,6 +972,7 @@ class ClawdREPL:
                 except json.JSONDecodeError as e:
                     self.console.print(f"[red]Invalid JSON input: {e}[/red]")
                     return
+            self.tool_context.usage_records.clear()
             try:
                 result = self.tool_registry.dispatch(ToolCall(name=name, input=payload), self.tool_context)
             except Exception as e:
@@ -773,6 +981,9 @@ class ClawdREPL:
             self.console.print("\n[bold]Tool result:[/bold]")
             self.console.print(json.dumps(result.output, indent=2, ensure_ascii=False))
             self.console.print()
+            if self.tool_context.usage_records:
+                self._record_and_print_task_usage({})
+                self.console.print()
 
         elif cmd == '/clear':
             # Try new command system first, fall back to original
@@ -812,7 +1023,7 @@ class ClawdREPL:
             elif action == "toggle":
                 self.stream = not self.stream
             else:
-                self.console.print("[red]Usage: /stream [on|off|toggle][/red]")
+                self.console.print("[red]Usage: /stream-responses [on|off|toggle][/red]")
                 return
 
             status = "enabled" if self.stream else "disabled"
@@ -826,27 +1037,26 @@ class ClawdREPL:
         elif cmd.startswith('/load'):
             parts = command.strip().split(maxsplit=1)
             if len(parts) < 2:
-                self.console.print("[red]Usage: /load <session-id>[/red]")
+                self.console.print("[red]Usage: /load-session <session-id>[/red]")
             else:
                 session_id = parts[1]
                 self.load_session(session_id)
+
+        elif cmd == '/resume' or cmd.startswith('/resume '):
+            parts = command.strip().split(maxsplit=1)
+            session_id = parts[1].strip() if len(parts) > 1 else None
+            self.resume_session(session_id)
 
         elif cmd == '/skill':
             self._handle_skill_command()
 
         elif cmd == '/context':
-            # Populate command context config for context analysis
-            self.command_context.config["provider"] = self.provider
-            self.command_context.config["model"] = self.provider.model
-            self.command_context.config["tool_schemas"] = [
-                spec.to_dict() if hasattr(spec, "to_dict") else {
-                    "name": spec.name,
-                    "description": spec.description,
-                    "input_schema": dict(spec.input_schema) if hasattr(spec.input_schema, "keys") else spec.input_schema,
-                }
-                for spec in self.tool_registry.list_specs()
-            ]
-            self.command_context.config["system_prompt"] = ""
+            # /context-usage reads the live preflight through context-specific
+            # references created at REPL initialization. Do not populate the
+            # generic provider key used by commands that may make provider calls.
+            self.command_context.config["context_provider"] = self.provider
+            self.command_context.config["context_tool_registry"] = self.tool_registry
+            self.command_context.config["context_tool_context"] = self.tool_context
             # Try new command system
             try:
                 handled, result_text = self._try_execute_new_command('context', '')
@@ -855,24 +1065,48 @@ class ClawdREPL:
                     return
             except Exception:
                 pass
-            self.console.print("[yellow]/context analysis unavailable in this context.[/yellow]")
+            self.console.print("[yellow]/context-usage analysis unavailable in this context.[/yellow]")
+
+        elif cmd == '/doctor':
+            try:
+                handled, result_text = self._try_execute_new_command('doctor', '')
+                if handled and result_text:
+                    self.console.print(Markdown(result_text))
+                    return
+            except Exception as exc:
+                self.console.print(f"[red]/doctor failed locally: {exc}[/red]")
+                return
+            self.console.print("[yellow]/doctor diagnostics unavailable.[/yellow]")
 
         elif cmd == '/compact':
-            # Populate command context config for compact
+            # /compact is an explicit request to use the active provider for
+            # summarization. Keep that provider capability scoped to this command.
+            previous_provider = self.command_context.config.get("provider")
+            previous_model = self.command_context.config.get("model")
+            had_provider = "provider" in self.command_context.config
+            had_model = "model" in self.command_context.config
             self.command_context.config["provider"] = self.provider
             self.command_context.config["model"] = self.provider.model
-            self.command_context.config["system_prompt"] = ""
-            # Try new command system
             try:
                 handled, result_text = self._try_execute_new_command('compact', '')
-                if handled and result_text:
-                    self.console.print("\n[green]" + result_text + "[/green]")
+                if handled:
+                    if result_text:
+                        self.console.print("\n[green]" + result_text + "[/green]")
                     return
-            except Exception:
-                pass
-            # Simple fallback: just clear conversation
-            self.session.conversation.clear()
-            self.console.print("[green]Conversation cleared.[/green]")
+                self.console.print("[yellow]/compact is unavailable; conversation preserved.[/yellow]")
+            except Exception as exc:
+                self.console.print(
+                    f"[red]/compact failed safely; conversation preserved: {exc}[/red]"
+                )
+            finally:
+                if had_provider:
+                    self.command_context.config["provider"] = previous_provider
+                else:
+                    self.command_context.config.pop("provider", None)
+                if had_model:
+                    self.command_context.config["model"] = previous_model
+                else:
+                    self.command_context.config.pop("model", None)
 
         else:
             if raw.startswith("/"):
@@ -881,6 +1115,9 @@ class ClawdREPL:
             self.console.print(f"[red]Unknown command: {command}[/red]")
 
     def _try_run_skill_slash(self, raw: str) -> bool:
+        if self.tool_registry.get("Skill") is None:
+            return False
+
         text = raw.strip()
         if not text.startswith("/"):
             return False
@@ -896,17 +1133,20 @@ class ClawdREPL:
         if not skill_name:
             return False
 
+        previous_tool_allowlist = self.tool_context.tool_allowlist
         try:
             result = self.tool_registry.dispatch(
                 ToolCall(name="Skill", input={"skill": skill_name, "args": args}),
                 self.tool_context,
             )
         except Exception as e:
+            self.tool_context.tool_allowlist = previous_tool_allowlist
             self.console.print(f"[red]Skill error: {e}[/red]")
             return True
 
         payload = result.output if isinstance(result.output, dict) else {}
         if result.is_error or not payload.get("success"):
+            self.tool_context.tool_allowlist = previous_tool_allowlist
             err = payload.get("error") if isinstance(payload.get("error"), str) else "Unknown skill error"
             self.console.print(f"[red]{err}[/red]")
             return True
@@ -929,39 +1169,26 @@ class ClawdREPL:
 
         prompt = payload.get("prompt")
         if not isinstance(prompt, str) or not prompt.strip():
+            self.tool_context.tool_allowlist = previous_tool_allowlist
             self.console.print("[red]Skill produced empty prompt[/red]")
             return True
 
-        self.chat(prompt)
+        try:
+            self.chat(prompt)
+        finally:
+            self.tool_context.tool_allowlist = previous_tool_allowlist
         return True
 
     def show_help(self):
-        """Show help message."""
+        """Show organized command help."""
+        self._show_slash_palette()
         help_text = """
-**Available Commands:**
-
-- `/` - Show all commands and skills
-- `/help` - Show this help message
-- `/exit`, `/quit`, `/q` - Exit the REPL
-- `/clear`, `/reset`, `/new` - Clear conversation history
-- `/save` - Save current session
-- `/load <session-id>` - Load a previous session
-- `/multiline` - Toggle multiline input mode
-- `/stream [on|off|toggle]` - Toggle live response rendering
-- `/render-last` - Re-render the last assistant reply as Markdown
-- `/tools` - List available built-in tools
-- `/tool <name> <json>` - Run a tool directly
-- `/skills` - List all available skills
-- `/init` - Create CLAUDE.md file for the project
-- `/cost` - Show session cost and usage
-- `/compact` - Compact conversation to save context space
-
-**Usage:**
-- Type your message and press Enter to chat
-- Use Tab for command completion
-- Press Ctrl+C to interrupt current operation
+**Usage**
+- Type a message and press Enter to chat
+- Type `/` or use Tab for command completion
+- Press Ctrl+C to interrupt the current operation
 - Press Ctrl+D to exit
-- Use `/multiline` for multi-paragraph inputs
+- Use `/multiline-input` for multi-paragraph input
 """
         self.console.print(Markdown(help_text))
 
@@ -1039,9 +1266,7 @@ class ClawdREPL:
             messages = [{"role": "system", "content": style_prompt}, *messages]
         return messages, {}
 
-    def _should_try_direct_stream(self, user_input: str) -> bool:
-        if not self.stream:
-            return False
+    def _should_try_direct_response(self, user_input: str) -> bool:
         text = user_input.strip().lower()
         if not text or text.startswith("/"):
             return False
@@ -1056,35 +1281,91 @@ class ClawdREPL:
             "project", "workspace", "folder", "directory", "function",
             "class", "module", "code", "implementation", "readme",
             "pyproject", "package.json", "git", "commit", "diff", "tool",
+            "geminithink", "youtubeanalyze",
             "文件", "代码", "仓库", "项目", "目录", "读取", "写入", "修改",
             "搜索", "运行", "测试", "修复", "命令", "工具", "函数", "类",
         )
         return not any(marker in text for marker in code_task_markers)
 
-    def _stream_direct_response(self, on_text_chunk=None) -> str | None:
+    def _direct_response(self, on_text_chunk=None):
+        if not self.stream:
+            try:
+                api_messages, call_kwargs = self._build_direct_stream_payload()
+                response = self.provider.chat(api_messages, tools=None, **call_kwargs)
+            except Exception as exc:
+                if _is_provider_authentication_error(exc):
+                    raise
+                return None
+            full_response = getattr(response, "content", "") or ""
+            if not full_response:
+                return None
+            self.session.conversation.add_assistant_message(full_response)
+            return response
+
         streamed_chunks: list[str] = []
+
+        def capture_chunk(chunk: str) -> None:
+            if not chunk:
+                return
+            streamed_chunks.append(chunk)
+            if on_text_chunk is not None:
+                on_text_chunk(chunk)
 
         try:
             api_messages, call_kwargs = self._build_direct_stream_payload()
-            stream_iter = self.provider.chat_stream(api_messages, tools=None, **call_kwargs)
-            for chunk in stream_iter:
-                if not chunk:
-                    continue
-                streamed_chunks.append(chunk)
-                if on_text_chunk is not None:
-                    on_text_chunk(chunk)
-        except Exception:
-            # Safe fallback: only fall back when nothing has been emitted yet.
+            response = self.provider.chat_stream_response(
+                api_messages,
+                tools=None,
+                on_text_chunk=capture_chunk,
+                **call_kwargs,
+            )
+        except (NotImplementedError, AttributeError):
+            # Provider has no structured stream result. Preserve the old stream path,
+            # but usage will be unavailable for this direct response.
+            try:
+                api_messages, call_kwargs = self._build_direct_stream_payload()
+                for chunk in self.provider.chat_stream(api_messages, tools=None, **call_kwargs):
+                    capture_chunk(chunk)
+            except Exception as exc:
+                if _is_provider_authentication_error(exc):
+                    raise
+                if not streamed_chunks:
+                    return None
+                raise
+            if not streamed_chunks:
+                return None
+            full_response = "".join(streamed_chunks)
+            self.session.conversation.add_assistant_message(full_response)
+            return {"content": full_response, "usage": {}}
+        except Exception as exc:
+            # Authentication failures must reach the recovery path immediately;
+            # other failures may use the existing fallback only before output.
+            if _is_provider_authentication_error(exc):
+                raise
             if not streamed_chunks:
                 return None
             raise
 
-        if not streamed_chunks:
+        full_response = getattr(response, "content", "") or "".join(streamed_chunks)
+        if not full_response:
             return None
-
-        full_response = "".join(streamed_chunks)
         self.session.conversation.add_assistant_message(full_response)
-        return full_response
+        return response
+
+    def _confirm_high_token_agent_request(self, estimated_input_tokens: int) -> bool:
+        """Ask once before a high-token first agent request is sent."""
+        self.console.print("")
+        self.console.print("[bold yellow]High token estimate[/bold yellow]")
+        self.console.print(
+            "  This task is estimated to send about "
+            f"[bold]{estimated_input_tokens:,} first-request input tokens[/bold] "
+            "to the provider."
+        )
+        self.console.print(
+            "  Actual usage may differ, and additional tool turns can use more tokens."
+        )
+        choice = input("Continue? [y/n]> ").strip().lower()
+        return choice in ("y", "yes")
 
     def _get_last_assistant_text(self) -> str | None:
         for message in reversed(self.session.conversation.messages):
@@ -1115,6 +1396,151 @@ class ClawdREPL:
         self.console.print()
         return True
 
+    def _primary_usage_label(self) -> str:
+        provider_labels = {
+            "anthropic": "Claude",
+            "openai": "OpenAI",
+            "deepseek": "DeepSeek",
+            "qwen": "Qwen",
+            "glm": "GLM",
+            "minimax": "MiniMax",
+        }
+        provider_key = str(getattr(self, "provider_name", "") or "").strip().lower()
+        provider_label = provider_labels.get(provider_key, provider_key.title() or "Primary provider")
+        model = str(getattr(self.provider, "model", "") or "").strip()
+        return f"{provider_label} ({model})" if model else provider_label
+
+    def _record_and_print_task_usage(self, usage, skills_used: set[str] | None = None) -> None:
+        usage = usage if isinstance(usage, dict) else {}
+        input_tokens = int(usage.get("input_tokens", 0) or 0)
+        output_tokens = int(usage.get("output_tokens", 0) or 0)
+        thought_tokens = int(usage.get("thought_tokens", 0) or 0)
+        tool_use_tokens = int(usage.get("tool_use_tokens", 0) or 0)
+        cached_tokens = int(usage.get("cached_tokens", 0) or 0)
+        total_tokens = int(usage.get("total_tokens", 0) or 0) or (input_tokens + output_tokens)
+        task_usage: dict[str, dict[str, int]] = {}
+
+        def add_task_usage(label: str, values: dict[str, int]) -> None:
+            bucket = task_usage.setdefault(
+                label,
+                {
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "thought_tokens": 0,
+                    "tool_use_tokens": 0,
+                    "cached_tokens": 0,
+                    "total_tokens": 0,
+                },
+            )
+            for key in bucket:
+                bucket[key] += max(0, int(values.get(key, 0) or 0))
+
+        if total_tokens > 0:
+            primary_label = self._primary_usage_label()
+            primary = {
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "thought_tokens": thought_tokens,
+                "tool_use_tokens": tool_use_tokens,
+                "cached_tokens": cached_tokens,
+                "total_tokens": total_tokens,
+            }
+            self.cost_tracker.record_usage(
+                primary_label,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                total_tokens=total_tokens,
+                thought_tokens=thought_tokens,
+                tool_use_tokens=tool_use_tokens,
+                cached_tokens=cached_tokens,
+            )
+            append_provider_usage({"label": primary_label, **primary})
+            add_task_usage(primary_label, primary)
+
+        records = self.tool_context.consume_usage_records()
+        for record in records:
+            label = str(record.get("label") or "External provider")
+            values = {
+                "input_tokens": int(record.get("input_tokens", 0) or 0),
+                "output_tokens": int(record.get("output_tokens", 0) or 0),
+                "thought_tokens": int(record.get("thought_tokens", 0) or 0),
+                "tool_use_tokens": int(record.get("tool_use_tokens", 0) or 0),
+                "cached_tokens": int(record.get("cached_tokens", 0) or 0),
+                "total_tokens": int(record.get("total_tokens", 0) or 0),
+            }
+            self.cost_tracker.record_usage(
+                label,
+                input_tokens=values["input_tokens"],
+                output_tokens=values["output_tokens"],
+                total_tokens=values["total_tokens"],
+                thought_tokens=values["thought_tokens"],
+                tool_use_tokens=values["tool_use_tokens"],
+                cached_tokens=values["cached_tokens"],
+            )
+            add_task_usage(label, values)
+
+        if hasattr(self, "command_context") and self.command_context:
+            self.command_context.cost_tracker = self.cost_tracker
+
+        extra_usage: list[str] = []
+        used = sorted(skills_used or set())
+        if used:
+            try:
+                from src.skills.trust_registry import SkillTrustRegistry
+
+                trust = SkillTrustRegistry()
+                for name in used:
+                    record = trust.get(name) or {}
+                    declared = record.get("additional_claude_usage") or {}
+                    if bool(declared.get("expected", False)):
+                        level = str(declared.get("level") or "unknown")
+                        reason = str(declared.get("reason") or "").strip()
+                        detail = f"{name} ({level})"
+                        if reason:
+                            detail += f": {reason}"
+                        extra_usage.append(detail)
+            except Exception:
+                extra_usage = [f"{name} (usage metadata unavailable)" for name in used]
+
+        if task_usage:
+            self.console.print("[dim]Usage this task:[/dim]")
+            for label, values in task_usage.items():
+                details = (
+                    f"{values['input_tokens']:,} input, "
+                    f"{values['output_tokens']:,} output"
+                )
+                if values["thought_tokens"]:
+                    details += f", {values['thought_tokens']:,} thought"
+                if values["tool_use_tokens"]:
+                    details += f", {values['tool_use_tokens']:,} tool-use"
+                if values["cached_tokens"]:
+                    details += f", {values['cached_tokens']:,} cached"
+                self.console.print(
+                    f"[dim]  {label}: {details} = "
+                    f"{values['total_tokens']:,} total tokens[/dim]"
+                )
+            if len(task_usage) > 1:
+                combined = sum(v["total_tokens"] for v in task_usage.values())
+                self.console.print(f"[dim]  Combined tracked total: {combined:,} tokens[/dim]")
+        else:
+            self.console.print("[dim]Usage this task: providers did not return token counts.[/dim]")
+
+        if extra_usage:
+            self.console.print(
+                "[yellow]Additional Claude usage declared by skill(s): "
+                + "; ".join(extra_usage)
+                + "[/yellow]"
+            )
+        elif used:
+            self.console.print(
+                "[dim]Additional Claude usage declared by used skills: none.[/dim]"
+            )
+
+        self.console.print(
+            "[dim]Use /session-usage for JR's tracked session tokens "
+            "or /usage for API/model usage plus skill and tool activity.[/dim]"
+        )
+
     def chat(self, user_input: str, max_turns: int = 20):
         """Send message to LLM and display response.
 
@@ -1122,13 +1548,27 @@ class ClawdREPL:
             user_input: The user message to send.
             max_turns: Maximum number of tool call turns (default 20, higher for complex commands).
         """
-        # Add user message
+        # Start each user task with a fresh external-provider usage bucket.
+        self.tool_context.usage_records.clear()
+
+        # Preserve the exact pre-turn state so a provider authentication rejection
+        # can roll back an unanswered user message without erasing any later
+        # assistant/tool activity that may already have happened.
+        pre_task_messages = list(self.session.conversation.messages)
         self.session.conversation.add_user_message(user_input)
+        added_user_message = (
+            self.session.conversation.messages[-1]
+            if self.session.conversation.messages
+            and self.session.conversation.messages[-1].role == "user"
+            and self.session.conversation.messages[-1].content == user_input
+            else None
+        )
 
         try:
             self.console.print("\n[bold]Assistant[/bold]")
 
             stream_started = False
+            skills_used: set[str] = set()
 
             def _stop_status_once() -> None:
                 nonlocal stream_started
@@ -1141,6 +1581,10 @@ class ClawdREPL:
 
             def on_event(ev: ToolEvent) -> None:
                 if ev.kind == "tool_use":
+                    if ev.tool_name == "Skill" and isinstance(ev.tool_input, dict):
+                        skill_name = ev.tool_input.get("skill")
+                        if isinstance(skill_name, str) and skill_name.strip():
+                            skills_used.add(skill_name.strip().lstrip("/"))
                     summary = summarize_tool_use(ev.tool_name, ev.tool_input or {})
                     if isinstance(summary, str) and summary:
                         summary = self._shorten_path_text(summary)
@@ -1174,14 +1618,48 @@ class ClawdREPL:
                 _stop_status_once()
                 self.console.print(chunk, end="", markup=False, highlight=False, soft_wrap=True)
 
-            if self._should_try_direct_stream(user_input):
+            if self._should_try_direct_response(user_input):
                 self._current_status = self.console.status("[dim]Thinking...[/dim]", spinner="dots")
                 with self._current_status:
-                    direct_response = self._stream_direct_response(on_text_chunk=on_text_chunk)
+                    direct_response = self._direct_response(
+                        on_text_chunk=on_text_chunk if self.stream else None
+                    )
                 self._current_status = None
                 if direct_response is not None:
-                    self.console.print("\n")
+                    direct_usage = (
+                        direct_response.get("usage", {})
+                        if isinstance(direct_response, dict)
+                        else getattr(direct_response, "usage", {})
+                    )
+                    if self.stream:
+                        self.console.print("\n")
+                    else:
+                        direct_text = (
+                            direct_response.get("content", "")
+                            if isinstance(direct_response, dict)
+                            else getattr(direct_response, "content", "")
+                        )
+                        self.console.print(Markdown(direct_text))
+                        self.console.print("\n")
+                    self._record_and_print_task_usage(direct_usage, skills_used)
+                    self.console.print()
                     return
+
+            # The direct/no-tools route above stays warning-free. Only now, once
+            # the agent route is selected, assemble the exact first request locally.
+            preflight = build_agent_preflight(
+                self.session.conversation,
+                self.provider,
+                self.tool_registry,
+                self.tool_context,
+            )
+            if (
+                preflight.estimated_input_tokens >= 10_000
+                and not self._confirm_high_token_agent_request(preflight.estimated_input_tokens)
+            ):
+                self.console.print("[dim]Request cancelled before contacting the provider.[/dim]")
+                self.console.print()
+                return
 
             # Use agent loop with tools for any provider that supports it
             self._current_status = self.console.status("[dim]Thinking...[/dim]", spinner="dots")
@@ -1196,21 +1674,9 @@ class ClawdREPL:
                     verbose=False,
                     on_event=on_event,
                     on_text_chunk=on_text_chunk if self.stream else None,
+                    preflight=preflight,
                 )
             self._current_status = None
-
-            # Record usage to cost tracker
-            if result.usage:
-                input_tokens = result.usage.get("input_tokens", 0)
-                output_tokens = result.usage.get("output_tokens", 0)
-                if input_tokens > 0 or output_tokens > 0:
-                    self.cost_tracker.record(
-                        f"turn_{result.num_turns}_tokens",
-                        input_tokens + output_tokens
-                    )
-                    # Also update command context for new commands
-                    if hasattr(self, 'command_context') and self.command_context:
-                        self.command_context.cost_tracker = self.cost_tracker
 
             if self.stream and stream_started:
                 self.console.print()
@@ -1219,125 +1685,246 @@ class ClawdREPL:
                 self.console.print(Markdown(result.response_text))
                 self.console.print("\n")
 
+            self._record_and_print_task_usage(result.usage, skills_used)
+            self.console.print()
+
         except Exception as e:
-            error_str = str(e)
+            # The status context manager has already stopped; clear the stale
+            # reference so later permission/user prompts do not try to restart it.
+            self._current_status = None
 
-            # Check for authentication errors
-            if "401" in error_str or "authentication" in error_str.lower() or "令牌" in error_str:
-                self.console.print(f"\n[red]❌ Authentication Error: {e}[/red]")
-                self.console.print("\n[yellow]Your API key appears to be invalid or expired.[/yellow]")
+            if _is_provider_authentication_error(e):
+                current_messages = self.session.conversation.messages
+                clean_unanswered_turn = current_messages == pre_task_messages
+                if (
+                    added_user_message is not None
+                    and current_messages
+                    and current_messages[-1] is added_user_message
+                    and not stream_started
+                ):
+                    current_messages[:] = pre_task_messages
+                    clean_unanswered_turn = True
 
-                # Ask if user wants to reconfigure
+                self.console.print("\n[red]❌ Authentication Error[/red]")
+                self.console.print(
+                    "\n[yellow]The active provider rejected authentication. "
+                    "Your API key may be invalid or expired.[/yellow]"
+                )
+
+                # Ask if user wants to reconfigure. Do not retry the failed provider
+                # request automatically; a retry can incur provider usage/cost.
                 from rich.prompt import Prompt
                 choice = Prompt.ask(
-                    "\nWould you like to reconfigure your API key now?",
+                    "\nWould you like to reconfigure your provider now?",
                     choices=["y", "n"],
-                    default="y"
+                    default="y",
                 )
 
                 if choice == "y":
-                    self._handle_relogin()
+                    if self._handle_relogin():
+                        if clean_unanswered_turn:
+                            self.console.print(
+                                "[dim]The rejected user turn was removed from conversation "
+                                "and was not retried automatically. Re-send it when ready.[/dim]"
+                            )
+                        else:
+                            self.console.print(
+                                "[yellow]The incomplete turn already contains assistant/tool "
+                                "activity, so it was preserved and was not retried automatically. "
+                                "Review it before continuing.[/yellow]"
+                            )
                 else:
-                    self.console.print("\n[dim]You can run [bold]clawd login[/bold] later to update your API key.[/dim]")
+                    self.console.print(
+                        "\n[dim]You can run [bold]clawd login[/bold] later "
+                        "to update provider configuration.[/dim]"
+                    )
+                    if clean_unanswered_turn:
+                        self.console.print(
+                            "[dim]The rejected user turn was removed from conversation; "
+                            "re-send it after reconfiguration.[/dim]"
+                        )
             else:
                 # Generic error handling
                 self.console.print(f"\n[red]Error: {e}[/red]")
                 import traceback
                 traceback.print_exc()
 
-    def _handle_relogin(self):
-        """Handle re-authentication when API key fails."""
+    def _handle_relogin(self) -> bool:
+        """Reconfigure and activate a provider after an authentication failure."""
         from rich.prompt import Prompt
-        from src.config import set_api_key, set_default_provider
-        from src.providers import PROVIDER_INFO
+        from src.config import get_provider_config, set_api_key, set_default_provider
+        from src.providers import (
+            PROVIDER_INFO,
+            get_provider_class,
+            validate_provider_runtime_config,
+        )
 
-        self.console.print("\n[bold blue]🔑 Reconfigure API Key[/bold blue]\n")
+        self.console.print("\n[bold blue]🔑 Reconfigure Provider[/bold blue]\n")
 
-        # Show available providers and defaults
         provider_names = list(PROVIDER_INFO.keys())
         self.console.print("[bold]Available providers:[/bold]")
         for name, info in PROVIDER_INFO.items():
-            self.console.print(f"  [cyan]{name}[/cyan] - {info['label']} (default model: {info['default_model']})")
+            self.console.print(
+                f"  [cyan]{name}[/cyan] - {info['label']} "
+                f"(default model: {info['default_model']})"
+            )
         self.console.print()
 
-        # Select provider
         provider = Prompt.ask(
             "Select LLM provider",
             choices=provider_names,
-            default=self.provider_name if self.provider_name in provider_names else "anthropic"
+            default=self.provider_name if self.provider_name in provider_names else "anthropic",
         )
-
         info = PROVIDER_INFO[provider]
+        configured = get_provider_config(provider)
 
-        # Input API Key
-        api_key = Prompt.ask(
-            f"Enter {provider.upper()} API Key",
-            password=True
-        )
+        # Re-authentication always requires a fresh key for credentialed
+        # providers; do not echo or silently reuse the rejected credential.
+        requires_api_key = info.get("requires_api_key", True)
+        api_key = ""
+        if requires_api_key:
+            api_key = Prompt.ask(
+                f"Enter {provider.upper()} API Key",
+                password=True,
+            )
+            if not api_key:
+                self.console.print("\n[red]Error: API Key cannot be empty[/red]")
+                return False
+        else:
+            self.console.print(
+                "\n[dim]This local-only provider does not require an API key.[/dim]"
+            )
 
-        if not api_key:
-            self.console.print("\n[red]Error: API Key cannot be empty[/red]")
-            return
+        base_url_default = configured.get("base_url") or info["default_base_url"]
+        model_default = configured.get("default_model") or info["default_model"]
 
-        # Optional: Base URL (show default)
-        self.console.print(f"\n[dim]Default:[/dim] {info['default_base_url']}")
+        self.console.print(f"\n[dim]Current/default:[/dim] {base_url_default}")
         base_url = Prompt.ask(
             f"{provider.upper()} Base URL",
-            default=info["default_base_url"]
+            default=base_url_default,
         )
 
-        # Optional: Default Model (show options)
-        self.console.print(f"\n[dim]Available models:[/dim] {', '.join(info['available_models'])}")
-        self.console.print(f"[dim]Default:[/dim] [bold]{info['default_model']}[/bold]")
+        self.console.print(
+            f"\n[dim]Available models:[/dim] {', '.join(info['available_models'])}"
+        )
+        self.console.print(f"[dim]Current/default:[/dim] [bold]{model_default}[/bold]")
         default_model = Prompt.ask(
             f"{provider.upper()} Default Model",
-            default=info["default_model"]
+            default=model_default,
         )
 
-        # Save configuration
-        set_api_key(provider, api_key=api_key, base_url=base_url, default_model=default_model)
-        set_default_provider(provider)
+        candidate_config = {
+            "api_key": api_key,
+            "base_url": base_url,
+            "default_model": default_model,
+        }
+        try:
+            validate_provider_runtime_config(provider, candidate_config)
+        except ValueError as exc:
+            self.console.print(f"\n[red]Error: {exc}[/red]")
+            return False
 
-        self.console.print(f"\n[green]✓ {provider.upper()} API Key updated successfully![/green]\n")
+        # Construct the replacement before persisting or switching runtime state.
+        # Provider constructors are expected to be local/lazy; no request is sent.
+        try:
+            provider_class = get_provider_class(provider)
+            candidate_provider = provider_class(
+                api_key=api_key,
+                base_url=base_url,
+                model=default_model,
+            )
+        except Exception as exc:
+            self.console.print(
+                "\n[red]Unable to initialize the selected provider "
+                f"({type(exc).__name__}). Configuration was not changed.[/red]"
+            )
+            return False
 
-        # Reinitialize provider
-        from src.config import get_provider_config
-        from src.providers import get_provider_class
+        try:
+            set_api_key(
+                provider,
+                api_key=api_key,
+                base_url=base_url,
+                default_model=default_model,
+            )
+            set_default_provider(provider)
+        except Exception as exc:
+            self.console.print(
+                "\n[red]Unable to save provider configuration "
+                f"({type(exc).__name__}). Runtime provider was not changed.[/red]"
+            )
+            return False
 
-        config = get_provider_config(provider)
-        provider_class = get_provider_class(provider)
-
-        self.provider = provider_class(
-            api_key=config["api_key"],
-            base_url=config.get("base_url"),
-            model=config.get("default_model")
-        )
+        self.provider = candidate_provider
         self.provider_name = provider
 
-        self.console.print("[green]✓ Provider reinitialized. You can continue chatting![/green]\n")
+        # Keep every live consumer aligned with the provider that is now active.
+        self.session.provider = provider
+        self.session.model = candidate_provider.model
+        self.command_context.config["context_provider"] = candidate_provider
+
+        if requires_api_key:
+            self.console.print(
+                f"\n[green]✓ {provider.upper()} API key updated successfully![/green]"
+            )
+        else:
+            self.console.print(
+                f"\n[green]✓ {provider.upper()} local provider configuration updated.[/green]"
+            )
+        self.console.print(
+            "[green]✓ Provider reinitialized. Future requests use the new provider.[/green]\n"
+        )
+        return True
 
     def save_session(self):
-        """Save current session."""
+        """Save current session using the provider/model actually active now."""
+        self.session.provider = self.provider_name
+        self.session.model = self.provider.model
         self.session.save()
         self.console.print(f"[green]Session saved: {self.session.session_id}[/green]")
 
     def load_session(self, session_id: str):
-        """Load a previous session.
+        """Load a previous conversation without silently changing provider routing.
 
         Args:
             session_id: Session ID to load
         """
         from src.agent import Session
 
-        loaded_session = Session.load(session_id)
+        try:
+            loaded_session = Session.load(session_id)
+        except (OSError, ValueError, json.JSONDecodeError, KeyError, TypeError) as exc:
+            self.console.print(f"[red]Unable to load session {session_id}: {exc}[/red]")
+            return
         if loaded_session is None:
             self.console.print(f"[red]Session not found: {session_id}[/red]")
             return
 
-        # Replace current session
+        saved_provider = loaded_session.provider
+        saved_model = loaded_session.model
+
+        # Replace the active conversation and rebind command-system consumers.
+        # Provider routing remains the explicitly active REPL provider.
         self.session = loaded_session
+        self.command_context.conversation = loaded_session.conversation
+        self.command_context.config["context_provider"] = self.provider
+        self.command_context.config["context_tool_registry"] = self.tool_registry
+        self.command_context.config["context_tool_context"] = self.tool_context
+
+        # Keep in-memory session metadata truthful for any subsequent save.
+        self.session.provider = self.provider_name
+        self.session.model = self.provider.model
+
         self.console.print(f"[green]Session loaded: {session_id}[/green]")
-        self.console.print(f"[dim]Provider: {loaded_session.provider}, Model: {loaded_session.model}[/dim]")
+        if saved_provider != self.provider_name or saved_model != self.provider.model:
+            self.console.print(
+                f"[yellow]Saved provider/model: {saved_provider} / {saved_model}. "
+                f"Active runtime remains: {self.provider_name} / {self.provider.model}.[/yellow]"
+            )
+        else:
+            self.console.print(
+                f"[dim]Provider: {self.provider_name}, Model: {self.provider.model}[/dim]"
+            )
         self.console.print(f"[dim]Messages: {len(loaded_session.conversation.messages)}[/dim]")
 
         # Show conversation history
@@ -1346,3 +1933,54 @@ class ClawdREPL:
             for msg in loaded_session.conversation.messages[-5:]:  # Show last 5 messages
                 role_color = "blue" if msg.role == "user" else "green"
                 self.console.print(f"[{role_color}]{msg.role}[/{role_color}]: {msg.content[:100]}...")
+
+    def resume_session(self, session_id: str | None = None):
+        """Resume a saved session by ID or from a recent-session picker."""
+        if session_id:
+            self.load_session(session_id)
+            return
+
+        sessions = [
+            session
+            for session in Session.list_saved(limit=20)
+            if session.session_id != self.session.session_id
+        ]
+        if not sessions:
+            self.console.print("[yellow]No other saved sessions available to resume.[/yellow]")
+            return
+
+        table = Table(title="Saved Sessions")
+        table.add_column("#", justify="right", style="cyan", no_wrap=True)
+        table.add_column("Session ID", style="white", no_wrap=True)
+        table.add_column("Updated", style="dim", no_wrap=True)
+        table.add_column("Messages", justify="right", no_wrap=True)
+        table.add_column("Provider / Model", style="dim")
+        for index, saved in enumerate(sessions, start=1):
+            updated = str(saved.updated_at or saved.created_at or "unknown")
+            if "T" in updated:
+                updated = updated.replace("T", " ", 1)
+            table.add_row(
+                str(index),
+                saved.session_id,
+                updated[:19],
+                str(len(saved.conversation.messages)),
+                f"{saved.provider} / {saved.model}",
+            )
+        self.console.print(table)
+
+        try:
+            from rich.prompt import Prompt
+            choice = Prompt.ask(
+                "Resume which session?",
+                choices=[*(str(index) for index in range(1, len(sessions) + 1)), "cancel"],
+                default="cancel",
+            )
+        except (EOFError, KeyboardInterrupt):
+            self.console.print("[yellow]Resume cancelled.[/yellow]")
+            return
+
+        if choice == "cancel":
+            self.console.print("[yellow]Resume cancelled.[/yellow]")
+            return
+
+        self.load_session(sessions[int(choice) - 1].session_id)

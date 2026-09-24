@@ -10,6 +10,7 @@ from typing import Any
 
 from ..context import ToolContext
 from ..errors import ToolInputError, ToolPermissionError
+from ..permission_handler import PermissionResult
 from ..protocol import ToolResult
 from ..registry import ToolSpec
 
@@ -39,10 +40,32 @@ def _html_to_text(raw: str) -> str:
     return html.unescape(without_tags)
 
 
+def _validate_fetch_url(url: str) -> None:
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in {"http", "https"}:
+        raise ToolPermissionError("only http/https URLs are allowed")
+    if not parsed.netloc:
+        raise ToolInputError("url must include a network location")
+
+    hostname = parsed.hostname or ""
+    if hostname == "localhost" or hostname.endswith(".localhost") or _is_private_host(hostname):
+        raise ToolPermissionError("refusing to fetch localhost/private network URLs")
+
+
+class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        _validate_fetch_url(newurl)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
 class WebFetchTool:
+    def check_permissions(self, tool_input: dict[str, Any], context: ToolContext) -> PermissionResult:
+        return PermissionResult.ask(f"Allow outbound web request to: {tool_input.get('url', '')}")
+
     def spec(self) -> ToolSpec:
         return ToolSpec(
             name="WebFetch",
+            permission_policy="checked",
             description="Fetch a URL and return extracted text content.",
             input_schema={
                 "type": "object",
@@ -59,18 +82,11 @@ class WebFetchTool:
         if not isinstance(url, str) or not url:
             raise ToolInputError("url must be a non-empty string")
 
-        parsed = urllib.parse.urlparse(url)
-        if parsed.scheme not in {"http", "https"}:
-            raise ToolPermissionError("only http/https URLs are allowed")
-        if not parsed.netloc:
-            raise ToolInputError("url must include a network location")
-
-        hostname = parsed.hostname or ""
-        if hostname in {"localhost"} or hostname.endswith(".localhost") or _is_private_host(hostname):
-            raise ToolPermissionError("refusing to fetch localhost/private network URLs")
+        _validate_fetch_url(url)
 
         req = urllib.request.Request(url, headers={"User-Agent": "clawd-codex/0.1"})
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        opener = urllib.request.build_opener(_SafeRedirectHandler())
+        with opener.open(req, timeout=15) as resp:
             raw_bytes = resp.read(1_000_000)
             content_type = resp.headers.get("Content-Type", "")
 

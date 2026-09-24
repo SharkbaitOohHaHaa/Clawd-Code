@@ -13,6 +13,7 @@ class SleepTool:
     def spec(self) -> ToolSpec:
         return ToolSpec(
             name="Sleep",
+            permission_policy="allow",
             description="Sleep for a short duration.",
             input_schema={
                 "type": "object",

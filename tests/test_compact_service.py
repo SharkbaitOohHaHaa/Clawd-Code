@@ -164,12 +164,14 @@ class TestCompactConversation(unittest.TestCase):
             return_value=ChatResponse(
                 content="User worked on Python code. Assistant helped with implementation.",
                 model="test",
-                usage={},
+                usage={"input_tokens": 900, "output_tokens": 100},
                 finish_reason="stop"
             )
         )
 
         result = asyncio.run(compact_conversation(conv, mock_provider, "claude-sonnet-4-6"))
+
+        self.assertEqual(result.usage, {"input_tokens": 900, "output_tokens": 100})
 
         # Boundary and summary are added (2 new messages)
         self.assertEqual(len(conv.messages), result.post_compact_count)

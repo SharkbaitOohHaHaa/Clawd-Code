@@ -83,9 +83,23 @@ class OpenAICompatibleProvider(BaseProvider):
     def _build_usage_dict(self, usage: Any) -> dict[str, Any]:
         if usage is None:
             return {}
+
+        prompt_details = getattr(usage, "prompt_tokens_details", None)
+        completion_details = getattr(usage, "completion_tokens_details", None)
+        cached_tokens = int(
+            getattr(prompt_details, "cached_tokens", 0)
+            or getattr(usage, "prompt_cache_hit_tokens", 0)
+            or 0
+        )
+        reasoning_tokens = int(
+            getattr(completion_details, "reasoning_tokens", 0)
+            or 0
+        )
         return {
             "input_tokens": getattr(usage, "prompt_tokens", 0),
             "output_tokens": getattr(usage, "completion_tokens", 0),
+            "thought_tokens": reasoning_tokens,
+            "cached_tokens": cached_tokens,
             "total_tokens": getattr(usage, "total_tokens", 0),
         }
 

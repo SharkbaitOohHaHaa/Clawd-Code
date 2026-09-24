@@ -13,10 +13,10 @@ from .openai_compatible import OpenAICompatibleProvider
 
 
 class GLMProvider(OpenAICompatibleProvider):
-    """GLM (Zhipu AI) provider using Zhipu SDK.
+    """GLM (Zhipu AI) provider using the Zhipu SDK."""
 
-    GLM models on z.ai require the 'zai/' prefix in model names.
-    """
+    DEFAULT_BASE_URL = "https://open.bigmodel.cn/api/paas/v4"
+    DEFAULT_MODEL = "glm-5-turbo"
 
     def __init__(
         self, api_key: str, base_url: Optional[str] = None, model: Optional[str] = None
@@ -25,10 +25,14 @@ class GLMProvider(OpenAICompatibleProvider):
 
         Args:
             api_key: Zhipu AI API key
-            base_url: Base URL (optional)
-            model: Default model (default: zai/glm-5)
+            base_url: Base URL (defaults to the BigModel OpenAI-compatible endpoint)
+            model: Default model (default: glm-5-turbo)
         """
-        super().__init__(api_key, base_url, model or "zai/glm-5")
+        super().__init__(
+            api_key,
+            base_url or self.DEFAULT_BASE_URL,
+            model or self.DEFAULT_MODEL,
+        )
 
     def _create_client(self) -> Any:
         """Create Zhipu AI SDK client."""
@@ -36,26 +40,17 @@ class GLMProvider(OpenAICompatibleProvider):
             raise ModuleNotFoundError(
                 "zhipuai package is not installed. Install optional dependencies to use GLMProvider."
             )
-        return ZhipuAI(api_key=self.api_key)
+        kwargs: dict[str, Any] = {"api_key": self.api_key}
+        if self.base_url:
+            kwargs["base_url"] = self.base_url
+        return ZhipuAI(**kwargs)
 
     def get_available_models(self) -> list[str]:
-        """Get list of available GLM models.
-
-        Returns:
-            List of model names (with zai/ prefix for z.ai API)
-        """
+        """Return current GLM model IDs used by Clawd."""
         return [
-            # GLM-5 series (latest, requires zai/ prefix)
-            "zai/glm-5",
-            "zai/glm-5-turbo",
-            # GLM-4 series (standard, zai/ prefix)
-            "zai/glm-4",
-            "zai/glm-4-plus",
-            "zai/glm-4-air",
-            "zai/glm-4-flash",
-            "zai/glm-4.5",
-            "zai/glm-4.6",
-            "zai/glm-4.7",
-            # GLM-3 series (legacy)
-            "zai/glm-3-turbo",
+            "glm-5.2",
+            "glm-5-turbo",
+            "glm-5",
+            "glm-4.7",
+            "glm-4.6",
         ]

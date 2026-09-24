@@ -6,6 +6,7 @@ import tempfile
 from unittest.mock import MagicMock
 
 from src.agent.conversation import Conversation
+from src.capabilities import expected_registered_tool_names, load_capability_manifest
 from src.providers.base import ChatResponse
 from src.tool_system.agent_loop import run_agent_loop
 from src.tool_system.context import ToolContext
@@ -23,50 +24,18 @@ class TestClaudeCodeToolParity(unittest.TestCase):
     def tearDown(self) -> None:
         self.tmp.cleanup()
 
-    def test_registry_has_claude_code_tool_names(self) -> None:
-        expected = [
-            "Agent",
-            "AskUserQuestion",
-            "Bash",
-            "Config",
-            "CronCreate",
-            "CronDelete",
-            "CronList",
-            "Edit",
-            "EnterPlanMode",
-            "EnterWorktree",
-            "ExitPlanMode",
-            "ExitWorktree",
-            "Glob",
-            "Grep",
-            "LSP",
-            "ListMcpResourcesTool",
-            "MCP",
-            "NotebookEdit",
-            "PowerShell",
-            "REPL",
-            "Read",
-            "ReadMcpResourceTool",
-            "RemoteTrigger",
-            "SendMessage",
-            "SendUserMessage",
-            "Skill",
-            "Sleep",
-            "StructuredOutput",
-            "TaskCreate",
-            "TaskGet",
-            "TaskList",
-            "TaskOutput",
-            "TaskStop",
-            "TaskUpdate",
-            "TodoWrite",
-            "ToolSearch",
-            "WebFetch",
-            "WebSearch",
-            "Write",
-        ]
-        missing = [name for name in expected if self.registry.get(name) is None]
-        self.assertEqual(missing, [])
+    def test_registry_matches_capability_manifest(self) -> None:
+        manifest = load_capability_manifest()
+        actual = sorted(spec.name for spec in self.registry.list_specs())
+        self.assertEqual(actual, expected_registered_tool_names(manifest))
+
+        unavailable = {
+            name for name, record in manifest["tools"].items()
+            if not record.get("registered_expected")
+        }
+        for name in unavailable:
+            with self.subTest(name=name):
+                self.assertIsNone(self.registry.get(name))
 
     def test_send_user_message_is_user_visible_fallback(self) -> None:
         conversation = Conversation()

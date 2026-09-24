@@ -16,7 +16,11 @@ class OpenAIProvider(OpenAICompatibleProvider):
     """OpenAI provider using OpenAI SDK."""
 
     def __init__(
-        self, api_key: str, base_url: Optional[str] = None, model: Optional[str] = None
+        self,
+        api_key: str,
+        base_url: Optional[str] = None,
+        model: Optional[str] = None,
+        max_retries: Optional[int] = None,
     ):
         """Initialize OpenAI provider.
 
@@ -24,8 +28,10 @@ class OpenAIProvider(OpenAICompatibleProvider):
             api_key: OpenAI API key
             base_url: Base URL (optional, for custom endpoints)
             model: Default model (default: gpt-5.4)
+            max_retries: Optional SDK-level retry override.
         """
         super().__init__(api_key, base_url, model or "gpt-5.4")
+        self._max_retries = max_retries
 
     def _create_client(self) -> Any:
         """Create OpenAI SDK client."""
@@ -36,6 +42,8 @@ class OpenAIProvider(OpenAICompatibleProvider):
         kwargs: dict[str, Any] = {"api_key": self.api_key}
         if self.base_url:
             kwargs["base_url"] = self.base_url
+        if self._max_retries is not None:
+            kwargs["max_retries"] = self._max_retries
         return OpenAI(**kwargs)
 
     def get_available_models(self) -> list[str]:

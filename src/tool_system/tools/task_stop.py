@@ -12,6 +12,7 @@ class TaskStopTool:
     def spec(self) -> ToolSpec:
         return ToolSpec(
             name="TaskStop",
+            permission_policy="allow",
             description="Stop a previously started background task by id.",
             input_schema={
                 "type": "object",

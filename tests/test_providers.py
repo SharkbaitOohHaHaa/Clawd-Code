@@ -5,9 +5,12 @@ from __future__ import annotations
 import unittest
 from unittest.mock import MagicMock, patch
 
-from src.providers import get_provider_class
+from src.providers import PROVIDER_INFO, get_provider_class
 from src.providers.anthropic_provider import AnthropicProvider
+from src.providers.deepseek_provider import DeepSeekProvider
+from src.providers.qwen_provider import QwenProvider
 from src.providers.glm_provider import GLMProvider
+from src.providers.minimax_provider import MinimaxProvider
 from src.providers.openai_provider import OpenAIProvider
 from src.providers.base import ChatMessage, ChatResponse
 
@@ -287,25 +290,154 @@ class TestOpenAIProvider(unittest.TestCase):
         self.assertEqual(response.usage["total_tokens"], 15)
 
 
+class TestDeepSeekProvider(unittest.TestCase):
+    """Test DeepSeek provider wiring without live API calls."""
+
+    def test_initialization(self):
+        provider = DeepSeekProvider(api_key="test_key")
+        self.assertEqual(provider.model, "deepseek-flash")
+        self.assertEqual(provider.base_url, "https://api.deepseek.com")
+
+    def test_custom_model_and_base_url(self):
+        provider = DeepSeekProvider(
+            api_key="test_key",
+            base_url="https://example.test",
+            model="deepseek-v4-pro",
+        )
+        self.assertEqual(provider.model, "deepseek-v4-pro")
+        self.assertEqual(provider.base_url, "https://example.test")
+
+    def test_get_available_models(self):
+        provider = DeepSeekProvider(api_key="test_key")
+        self.assertEqual(
+            provider.get_available_models(),
+            ["deepseek-flash", "deepseek-v4-pro"],
+        )
+
+    @patch("src.providers.openai_provider.OpenAI")
+    def test_client_uses_deepseek_endpoint(self, mock_openai):
+        provider = DeepSeekProvider(api_key="test_key")
+        _ = provider.client
+        mock_openai.assert_called_once_with(
+            api_key="test_key",
+            base_url="https://api.deepseek.com",
+        )
+
+    def test_usage_includes_cache_and_reasoning_details(self):
+        provider = DeepSeekProvider(api_key="test_key")
+        usage = MagicMock(
+            prompt_tokens=100,
+            completion_tokens=30,
+            total_tokens=130,
+            prompt_cache_hit_tokens=40,
+        )
+        usage.prompt_tokens_details = MagicMock(cached_tokens=40)
+        usage.completion_tokens_details = MagicMock(reasoning_tokens=12)
+
+        result = provider._build_usage_dict(usage)
+
+        self.assertEqual(result["input_tokens"], 100)
+        self.assertEqual(result["output_tokens"], 30)
+        self.assertEqual(result["cached_tokens"], 40)
+        self.assertEqual(result["thought_tokens"], 12)
+        self.assertEqual(result["total_tokens"], 130)
+
+
+class TestQwenProvider(unittest.TestCase):
+    """Test Qwen provider wiring without live API calls."""
+
+    def test_initialization(self):
+        provider = QwenProvider(api_key="test_key")
+        self.assertEqual(provider.model, "qwen3.8-max")
+        self.assertEqual(
+            provider.base_url,
+            "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+        )
+
+    def test_custom_model_and_base_url(self):
+        provider = QwenProvider(
+            api_key="test_key",
+            base_url="https://example.test",
+            model="qwen3-coder-plus",
+        )
+        self.assertEqual(provider.model, "qwen3-coder-plus")
+        self.assertEqual(provider.base_url, "https://example.test")
+
+    def test_get_available_models(self):
+        provider = QwenProvider(api_key="test_key")
+        self.assertEqual(
+            provider.get_available_models(),
+            [
+                "qwen3.8-max",
+                "qwen3.8-flash",
+                "qwen3.7-plus",
+                "qwen3.7-flash",
+                "qwen3-coder-plus",
+                "qwen3-coder-flash",
+            ],
+        )
+
+    @patch("src.providers.openai_provider.OpenAI")
+    def test_client_uses_singapore_endpoint(self, mock_openai):
+        provider = QwenProvider(api_key="test_key")
+        _ = provider.client
+        mock_openai.assert_called_once_with(
+            api_key="test_key",
+            base_url="https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+        )
+
+    @patch("src.providers.openai_provider.OpenAI")
+    def test_client_can_disable_sdk_retries_for_media_path(self, mock_openai):
+        provider = QwenProvider(api_key="test_key", max_retries=0)
+        _ = provider.client
+        mock_openai.assert_called_once_with(
+            api_key="test_key",
+            base_url="https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+            max_retries=0,
+        )
+
+
 class TestGLMProvider(unittest.TestCase):
     """Test GLM provider."""
 
     def test_initialization(self):
         """Test provider initialization."""
         provider = GLMProvider(api_key="test_key")
-        self.assertEqual(provider.model, "zai/glm-5")
+        self.assertEqual(provider.model, "glm-5-turbo")
+        self.assertEqual(
+            provider.base_url,
+            "https://open.bigmodel.cn/api/paas/v4",
+        )
 
-    def test_custom_model(self):
-        """Test provider with custom model."""
-        provider = GLMProvider(api_key="test_key", model="glm-4")
-        self.assertEqual(provider.model, "glm-4")
+    def test_custom_model_and_base_url(self):
+        """Test provider with custom model and endpoint."""
+        provider = GLMProvider(
+            api_key="test_key",
+            base_url="https://example.test/v4",
+            model="glm-4.6",
+        )
+        self.assertEqual(provider.model, "glm-4.6")
+        self.assertEqual(provider.base_url, "https://example.test/v4")
 
     def test_get_available_models(self):
         """Test getting available models."""
         provider = GLMProvider(api_key="test_key")
-        models = provider.get_available_models()
-        self.assertIn("zai/glm-4.5", models)
-        self.assertIn("zai/glm-4", models)
+        self.assertEqual(
+            provider.get_available_models(),
+            ["glm-5.2", "glm-5-turbo", "glm-5", "glm-4.7", "glm-4.6"],
+        )
+
+    @patch("src.providers.glm_provider.ZhipuAI")
+    def test_client_honors_configured_endpoint(self, mock_zhipu):
+        provider = GLMProvider(
+            api_key="test_key",
+            base_url="https://example.test/v4",
+        )
+        _ = provider.client
+        mock_zhipu.assert_called_once_with(
+            api_key="test_key",
+            base_url="https://example.test/v4",
+        )
 
     @patch("src.providers.glm_provider.ZhipuAI")
     def test_chat(self, mock_zhipu):
@@ -359,6 +491,66 @@ class TestGLMProvider(unittest.TestCase):
         self.assertEqual(response.reasoning_content, "Thinking...")
 
 
+class TestMinimaxProvider(unittest.TestCase):
+    """Test MiniMax provider wiring without live API calls."""
+
+    def test_initialization(self):
+        provider = MinimaxProvider(api_key="test_key")
+        self.assertEqual(provider.model, "MiniMax-M3")
+        self.assertEqual(
+            provider.base_url,
+            "https://api.minimaxi.com/anthropic",
+        )
+
+    def test_custom_model_and_base_url(self):
+        provider = MinimaxProvider(
+            api_key="test_key",
+            base_url="https://example.test/anthropic",
+            model="MiniMax-M2.7",
+        )
+        self.assertEqual(provider.model, "MiniMax-M2.7")
+        self.assertEqual(provider.base_url, "https://example.test/anthropic")
+
+    def test_get_available_models(self):
+        provider = MinimaxProvider(api_key="test_key")
+        models = provider.get_available_models()
+        self.assertEqual(models[0], "MiniMax-M3")
+        self.assertIn("MiniMax-M2.7", models)
+        self.assertIn("MiniMax-M2.7-highspeed", models)
+        self.assertIn("MiniMax-M2.5", models)
+
+    @patch("src.providers.minimax_provider.anthropic.Anthropic")
+    def test_client_uses_minimax_endpoint(self, mock_anthropic):
+        provider = MinimaxProvider(api_key="test_key")
+        _ = provider._ensure_client()
+        mock_anthropic.assert_called_once_with(
+            api_key="test_key",
+            base_url="https://api.minimaxi.com/anthropic",
+        )
+
+
+class TestChineseProviderParity(unittest.TestCase):
+    """Built-in Chinese providers expose consistent registry/runtime metadata."""
+
+    def test_registry_defaults_match_provider_instances(self):
+        providers = {
+            "deepseek": DeepSeekProvider,
+            "qwen": QwenProvider,
+            "glm": GLMProvider,
+            "minimax": MinimaxProvider,
+        }
+        for name, provider_class in providers.items():
+            with self.subTest(provider=name):
+                info = PROVIDER_INFO[name]
+                provider = provider_class(api_key="test_key")
+                self.assertEqual(provider.model, info["default_model"])
+                self.assertEqual(provider.base_url, info["default_base_url"])
+                self.assertEqual(
+                    provider.get_available_models(),
+                    info["available_models"],
+                )
+
+
 class TestGetProviderClass(unittest.TestCase):
     """Test get_provider_class function."""
 
@@ -372,10 +564,25 @@ class TestGetProviderClass(unittest.TestCase):
         cls = get_provider_class("openai")
         self.assertEqual(cls, OpenAIProvider)
 
+    def test_get_deepseek_provider(self):
+        """Test getting DeepSeek provider class."""
+        cls = get_provider_class("deepseek")
+        self.assertEqual(cls, DeepSeekProvider)
+
+    def test_get_qwen_provider(self):
+        """Test getting Qwen provider class."""
+        cls = get_provider_class("qwen")
+        self.assertEqual(cls, QwenProvider)
+
     def test_get_glm_provider(self):
         """Test getting GLM provider class."""
         cls = get_provider_class("glm")
         self.assertEqual(cls, GLMProvider)
+
+    def test_get_minimax_provider(self):
+        """Test getting MiniMax provider class."""
+        cls = get_provider_class("minimax")
+        self.assertEqual(cls, MinimaxProvider)
 
     def test_get_unknown_provider(self):
         """Test getting unknown provider."""

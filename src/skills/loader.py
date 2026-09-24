@@ -8,6 +8,7 @@ from typing import Dict, List, Optional, Sequence
 from .argument_substitution import parse_argument_names
 from .frontmatter import parse_frontmatter
 from .model import PromptSkill
+from .trust_registry import AuditChainError, SkillTrustRegistry, SkillTrustError
 
 
 def _candidate_user_skills_dirs() -> list[Path]:
@@ -129,21 +130,54 @@ def get_all_skills(
     *,
     project_root: str | Path | None = None,
     user_skills_dir: str | Path | None = None,
+    enforce_trust: bool = True,
 ) -> Sequence[PromptSkill]:
+    """
+    Discover skills, but expose only exact approved + active artifacts at runtime.
+
+    Set enforce_trust=False only for explicit auditing/import tooling and tests.
+    Installation is not activation.
+    """
     clear_skill_registry()
+
+    trust_registry: SkillTrustRegistry | None = None
+    if enforce_trust:
+        try:
+            trust_registry = SkillTrustRegistry()
+            trust_registry.verify_audit_chain()
+        except (AuditChainError, SkillTrustError):
+            return _REGISTRY.list()
+
+    def register_if_allowed(skill: PromptSkill) -> None:
+        if not enforce_trust:
+            _REGISTRY.register(skill)
+            return
+        if trust_registry is None or not skill.skill_root:
+            return
+        try:
+            allowed, _reason = trust_registry.is_active_and_current(
+                skill.name,
+                artifact_path=skill.skill_root,
+                declared_version=skill.version,
+            )
+        except (AuditChainError, SkillTrustError):
+            return
+        if allowed:
+            _REGISTRY.register(skill)
+
     if user_skills_dir is not None:
         user_dirs = [Path(user_skills_dir).expanduser().resolve()]
     else:
         user_dirs = _candidate_user_skills_dirs()
     for user_dir in user_dirs:
-        for s in load_skills_from_dir(user_dir, loaded_from="user"):
-            _REGISTRY.register(s)
+        for skill in load_skills_from_dir(user_dir, loaded_from="user"):
+            register_if_allowed(skill)
 
     managed_env = os.environ.get("CLAWD_MANAGED_SKILLS_DIR")
     if managed_env:
         managed_dir = Path(managed_env).expanduser().resolve()
-        for s in load_skills_from_dir(managed_dir, loaded_from="managed"):
-            _REGISTRY.register(s)
+        for skill in load_skills_from_dir(managed_dir, loaded_from="managed"):
+            register_if_allowed(skill)
 
     if project_root is not None:
         pr = Path(project_root).expanduser().resolve()
@@ -154,8 +188,8 @@ def get_all_skills(
         if compat_path != main_path:
             proj_dirs.append(compat_path)
         for pr_dir in proj_dirs:
-            for s in load_skills_from_dir(pr_dir, loaded_from="project"):
-                _REGISTRY.register(s)
+            for skill in load_skills_from_dir(pr_dir, loaded_from="project"):
+                register_if_allowed(skill)
 
     return _REGISTRY.list()
 

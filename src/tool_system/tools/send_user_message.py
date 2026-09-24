@@ -6,15 +6,36 @@ from pathlib import Path
 from typing import Any
 
 from ..context import ToolContext
-from ..errors import ToolInputError
+from ..errors import ToolInputError, ToolPermissionError
+from ..permission_handler import PermissionResult
+from ..permissions import sensitive_path_permission
 from ..protocol import ToolResult
 from ..registry import ToolSpec
 
 
 class SendUserMessageTool:
+    def check_permissions(
+        self, tool_input: dict[str, Any], context: ToolContext
+    ) -> PermissionResult:
+        attachments = tool_input.get("attachments")
+        if not isinstance(attachments, list):
+            return PermissionResult.allow()
+        for attachment in attachments:
+            if not isinstance(attachment, str) or not attachment:
+                continue
+            try:
+                path = self._resolve_attachment_path(attachment, context)
+            except ToolPermissionError as exc:
+                return PermissionResult.deny(str(exc))
+            result = sensitive_path_permission(path, operation="read")
+            if result.behavior.value != "allow":
+                return result
+        return PermissionResult.allow()
+
     def spec(self) -> ToolSpec:
         return ToolSpec(
             name="SendUserMessage",
+            permission_policy="checked",
             description="Send a message to the user (primary visible output channel).",
             input_schema={
                 "type": "object",
