@@ -26,6 +26,7 @@
     "MCP": {"state": "ACTIVE_SUPPORTED", "registered_expected": true, "permission_policy": "checked", "reason": "Local stdio MCP tool execution requires operator policy, fresh advertisement, pinned name/description/input/output contract, schema-valid input, and explicit approval for mutating or open-world tools."},
     "Memory": {"state": "CLAWD_SPECIFIC", "registered_expected": true, "permission_policy": "checked"},
     "NotebookEdit": {"state": "ACTIVE_SUPPORTED", "registered_expected": true, "permission_policy": "checked", "reason": "Structural Jupyter .ipynb cell replace/insert/delete with read-before-write, workspace/path protections, and no notebook execution."},
+    "OsvQuery": {"state": "CLAWD_SPECIFIC", "registered_expected": true, "permission_policy": "checked", "reason": "Read-only OSV.dev vulnerability-evidence lookup: api.osv.dev only over HTTPS, lookup identifiers only, explicit approval per call, one request per call with no re-sends, no redirects, no proxy; statuses records_found/no_records_found/incomplete/rate_limited/unavailable/http_404/invalid_request; an empty answer is never presented as proof of absence; evidence never approves any change."},
     "QwenMediaAnalyze": {"state": "CLAWD_SPECIFIC", "registered_expected": true, "permission_policy": "checked"},
     "Read": {"state": "ACTIVE_SUPPORTED", "registered_expected": true, "permission_policy": "checked"},
     "ReadMcpResourceTool": {"state": "ACTIVE_SUPPORTED", "registered_expected": true, "permission_policy": "checked", "reason": "Reads only resource URIs previously advertised by the same configured MCP server in the current Clawd session."},
@@ -74,6 +75,7 @@
     "sanitized_runtime_instrumentation": {"state": "ACTIVE_SUPPORTED", "reason": "Sanitized tool/skill/change/provider/usage ledgers are best-effort and local; /doctor reports ledger health plus recent sanitized runtime errors without provider/network calls."},
     "project_setup_advisor": {"state": "ACTIVE_SUPPORTED"},
     "skill_trust_runtime": {"state": "ACTIVE_SUPPORTED"},
+    "software_evidence_osv": {"state": "ACTIVE_SUPPORTED", "reason": "OsvQuery (v1a): single explicit, per-call-approved OSV.dev lookups (package+ecosystem+version, purl, commit, or advisory ID) sending only lookup identifiers to api.osv.dev; normalized evidence with explicit failure statuses; no retries, redirects, proxy, batch scanning, lockfile discovery, or cache; /doctor makes no OSV call; evidence never approves any change."},
     "subagent_runtime": {"state": "DEFERRED_NOT_PRODUCTION_READY", "reason": "No isolated child LLM loop, context, session, or worker runtime exists; Agent is same-context sequential tool dispatch and TeamCreate stores metadata only."}
   }
 }

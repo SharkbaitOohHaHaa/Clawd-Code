@@ -65,7 +65,7 @@ class PermissionContractTests(unittest.TestCase):
 
     def test_default_registry_has_explicit_policy_for_every_tool(self) -> None:
         registry = build_default_registry(include_user_tools=False)
-        self.assertEqual(len(registry.list_specs()), 44)
+        self.assertEqual(len(registry.list_specs()), 45)
         self.assertTrue(all(spec.permission_policy for spec in registry.list_specs()))
 
 

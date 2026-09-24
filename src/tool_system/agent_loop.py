@@ -85,6 +85,8 @@ def summarize_tool_result(name: str, output: Any) -> str:
         tid = output.get("task_id")
         stopped = output.get("stopped")
         return f"{name} · {tid} · stopped={stopped}"
+    if name.lower() == "osvquery":
+        return f"{name} · {output.get('status')} · {output.get('statement')}"
     if name.lower() == "sendusermessage":
         n = 0
         atts = output.get("attachments")

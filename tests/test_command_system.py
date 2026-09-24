@@ -314,6 +314,36 @@ class TestBuiltinCommands(unittest.TestCase):
         self.assertIn("**Deferred capabilities:** subagent_runtime", result)
         self.assertIn("**Network/provider checks:** not run; doctor is local and read-only", result)
 
+    def test_doctor_shows_static_osv_line_without_any_network(self):
+        """A5: /doctor describes OSV locally and never contacts it."""
+        healthy = {
+            "manifest_schema_version": 1,
+            "tools": {"registered": ["OsvQuery"], "expected_registered": ["OsvQuery"], "metadata": {}, "issues": []},
+            "skills": {"audit_chain": {"valid": True, "entries": 1}, "records": {}, "issues": []},
+            "deferred_features": [],
+        }
+
+        with patch.dict(
+            os.environ,
+            {"HOME": str(self.workspace_root), "USERPROFILE": str(self.workspace_root)},
+            clear=False,
+        ), patch("src.capabilities.reconcile_capabilities", return_value=healthy), \
+             patch("socket.create_connection") as connect, patch("socket.getaddrinfo") as dns, \
+             patch("src.osv_evidence._open_connection") as osv_open, \
+             patch("src.osv_evidence.lookup") as osv_lookup:
+            success, result, error = execute_command_sync("doctor", "", self.context)
+
+        for probe in (connect, dns, osv_open, osv_lookup):
+            probe.assert_not_called()
+        self.assertTrue(success)
+        self.assertIn(
+            "**Software evidence (OSV):** OsvQuery configured for api.osv.dev only (query, vuln); "
+            "approval required per call; one request per call; no retries, redirects or proxy; "
+            "/doctor makes no OSV call",
+            result,
+        )
+        self.assertIn("**Network/provider checks:** not run; doctor is local and read-only", result)
+
     def test_doctor_reports_sanitized_observability_without_failing_on_history(self):
         healthy = {
             "manifest_schema_version": 1,

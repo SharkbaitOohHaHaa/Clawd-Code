@@ -26,7 +26,7 @@ class DataToolTests(unittest.TestCase):
         inspect_spec = registry.get("DataInspect").spec()
         transform_spec = registry.get("DataTransform").spec()
 
-        self.assertEqual(len(registry.list_specs()), 44)
+        self.assertEqual(len(registry.list_specs()), 45)
         self.assertEqual(inspect_spec.permission_policy, "checked")
         self.assertTrue(inspect_spec.is_read_only)
         self.assertEqual(transform_spec.permission_policy, "checked")

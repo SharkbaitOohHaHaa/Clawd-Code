@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from src.tool_system.context import ToolContext
 from src.tool_system.permission_handler import PermissionBehavior
 from src.tool_system.protocol import ToolCall
 from src.tool_system.registry import ToolRegistry
+from src.tool_system.tools.osv import OsvQueryTool
 from src.tool_system.tools.web_fetch import WebFetchTool
 from src.tool_system.tools.web_search import WebSearchTool
 
@@ -40,6 +42,28 @@ class TestOutboundWebPermissionSecurity(unittest.TestCase):
         self.assertTrue(search.is_error)
         self.assertIn("allow outbound web request", str(fetch.output).lower())
         self.assertIn("allow web search", str(search.output).lower())
+
+    def test_osv_query_requires_user_permission(self) -> None:
+        result = OsvQueryTool().check_permissions(
+            {"operation": "query", "ecosystem": "PyPI", "name": "jinja2", "version": "2.4.1"},
+            self.ctx,
+        )
+        self.assertEqual(result.behavior, PermissionBehavior.ASK)
+        self.assertIn("api.osv.dev", result.message or "")
+
+    def test_registry_denies_osv_query_without_permission_handler(self) -> None:
+        registry = ToolRegistry([OsvQueryTool()])
+        with patch("src.osv_evidence._open_connection", side_effect=AssertionError("no network")) as opener:
+            result = registry.dispatch(
+                ToolCall(
+                    name="OsvQuery",
+                    input={"operation": "query", "ecosystem": "PyPI", "name": "jinja2", "version": "2.4.1"},
+                ),
+                self.ctx,
+            )
+        self.assertTrue(result.is_error)
+        self.assertIn("allow osv evidence lookup", str(result.output).lower())
+        opener.assert_not_called()
 
 
 if __name__ == "__main__":

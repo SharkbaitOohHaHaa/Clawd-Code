@@ -852,6 +852,58 @@ class TestREPL(unittest.TestCase):
                 self.assertIs(allowed, expected_allowed)
                 self.assertIs(repl.tool_context.permission_context.allow_docs, expected_enabled)
 
+    def test_run_tool_output_is_printed_without_markup(self):
+        """F3: third-party text with Rich tags is shown literally and cannot crash /run-tool."""
+        import io
+        from rich.console import Console as RichConsole
+
+        repl = self._permission_prompt_repl()
+        out = io.StringIO()
+        repl.console = RichConsole(file=out, width=10000, color_system=None)
+        canned = {
+            "status": "records_found",
+            "reason": "none",
+            "statement": "canned",
+            "records": [{"summary": "[/x] [bold]boom :fire: done"}],
+            "next_page_token": None,
+        }
+        with patch("src.tool_system.tools.osv.lookup", return_value=canned), \
+             patch("builtins.input", return_value="y"):
+            repl.handle_command(
+                '/run-tool OsvQuery {"operation": "query", "ecosystem": "PyPI", "name": "jinja2", "version": "2.4.1"}'
+            )
+        self.assertIn("[/x] [bold]boom :fire: done", out.getvalue())
+
+    def test_osv_tool_results_display_clawd_statement_through_real_on_event(self):
+        """J2: the REPL's own on_event path shows Clawd's statement and never OSV text."""
+        import io
+        from rich.console import Console as RichConsole
+        from src.osv_evidence import ERROR_STATUSES, STATUSES
+        from src.tool_system.agent_loop import ToolEvent
+
+        for status in STATUSES:
+            with self.subTest(status=status):
+                repl = self._permission_prompt_repl()
+                out = io.StringIO()
+                repl.console = RichConsole(file=out, width=100000, color_system=None)
+                statement = f"Fixed Clawd statement for {status}. This evidence does not approve any change."
+                output = {"status": status, "reason": "none", "statement": statement,
+                          "records": [{"summary": "OSV-SUPPLIED-SUMMARY [bold]x"}]}
+                is_error = status in ERROR_STATUSES
+                if is_error:
+                    output["error"] = statement
+
+                def fake_loop(*args, **kwargs):
+                    kwargs["on_event"](ToolEvent(kind="tool_result", tool_name="OsvQuery", tool_input={},
+                                                 tool_output=output, is_error=is_error))
+                    return Mock(response_text="done", usage=None, num_turns=1)
+
+                with patch("src.repl.core.build_agent_preflight", return_value=Mock(estimated_input_tokens=0)), \
+                     patch("src.repl.core.run_agent_loop", side_effect=fake_loop):
+                    repl.chat("is jinja2 2.4.1 vulnerable?")
+                self.assertIn(statement, out.getvalue())
+                self.assertNotIn("OSV-SUPPLIED-SUMMARY", out.getvalue())
+
     def test_project_permission_policy_lock_prevents_enabling_allow_docs(self):
         with patch('src.config.get_config_path', return_value=self.config_dir / "config.json"):
             with patch('src.repl.core.Session.create'):
@@ -1790,6 +1842,56 @@ class TestREPL(unittest.TestCase):
 
                         # Session should not change
                         self.assertEqual(repl.session, original_session)
+
+
+class OsvRoutingTests(unittest.TestCase):
+    """J1: vulnerability-evidence questions skip the tool-less direct route."""
+
+    @staticmethod
+    def _direct(text: str) -> bool:
+        return ClawdREPL._should_try_direct_response(object(), text)
+
+    def test_vulnerability_questions_take_the_tool_route(self):
+        for text in (
+            "is jinja2 2.4.1 vulnerable?",
+            "any CVEs for lodash 4.17.20",
+            "look up GHSA-abcd-efgh-ijkl",
+            "check CVE-2024-3651",
+            "osv check pkg:npm/lodash@4.17.20",
+            "is there a security advisory for requests 2.0.0",
+            "what does PYSEC-2021-66 cover",
+        ):
+            with self.subTest(text=text):
+                self.assertFalse(self._direct(text))
+
+    def test_each_routing_branch_matches_on_its_own(self):
+        # Each prompt matches exactly one branch and none of the older code-task markers.
+        for text in (
+            "tell me about osv",
+            "check pkg:npm",
+            "explain OSV-2020-111",
+            "explain CVE-2024-3651",
+            "summarize GHSA-abcd-efgh-ijkl",
+            "summarize PYSEC-2021-66",
+            "any cves today",
+            "is it vulnerable",
+            "any security advisory",
+        ):
+            with self.subTest(text=text):
+                self.assertNotIn("/", text)
+                self.assertFalse(self._direct(text))
+
+    def test_near_misses_keep_the_direct_route(self):
+        for text in (
+            "hello",
+            "osvaldo says hi",
+            "which package manager is best",
+            "list pkgs",
+            "advisory board meeting today",
+            "cvent login help",
+        ):
+            with self.subTest(text=text):
+                self.assertTrue(self._direct(text))
 
 
 class TestConversation(unittest.TestCase):

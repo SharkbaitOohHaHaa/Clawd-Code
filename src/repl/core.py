@@ -68,6 +68,7 @@ except ModuleNotFoundError:  # pragma: no cover
             self.text = text
 from pathlib import Path
 import asyncio
+import re
 import sys
 import json
 from typing import Any
@@ -136,6 +137,14 @@ _AUTH_ERROR_MESSAGE_MARKERS = (
     "认证失败",
     "身份验证失败",
     "令牌无效",
+)
+
+
+# Vulnerability-evidence questions must reach the tool-capable route (OsvQuery)
+# instead of being answered from model memory by the tool-less direct route.
+_OSV_INTENT_PATTERN = re.compile(
+    r"\b(?:cve-\d{4}-\d{4,}|ghsa(?:-[0-9a-z]{4}){3}|osv-\d{4}-[\w-]+|pysec-\d{4}-\d+)\b"
+    r"|\bcves?\b|vulnerab|security advisor|\bosv\b|\bpkg:[a-z]"
 )
 
 
@@ -966,7 +975,9 @@ class ClawdREPL:
                 self.console.print(f"[red]Tool error: {e}[/red]")
                 return
             self.console.print("\n[bold]Tool result:[/bold]")
-            self.console.print(json.dumps(result.output, indent=2, ensure_ascii=False))
+            self.console.print(
+                json.dumps(result.output, indent=2, ensure_ascii=False), markup=False, emoji=False
+            )
             self.console.print()
             if self.tool_context.usage_records:
                 self._record_and_print_task_usage({})
@@ -1258,6 +1269,8 @@ class ClawdREPL:
         if not text or text.startswith("/"):
             return False
         if len(text) > 240:
+            return False
+        if _OSV_INTENT_PATTERN.search(text):
             return False
 
         code_task_markers = (

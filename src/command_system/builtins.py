@@ -29,6 +29,7 @@ from ..context_system.microcompact import microcompact_messages, strip_images_fr
 from ..cost_tracker import CostTracker
 from ..history import HistoryLog
 from ..observability import runtime_observability_snapshot
+from ..osv_evidence import osv_contract_status
 from ..providers.base import BaseProvider
 from ..usage_ledger import month_to_date_provider_usage
 from .engine import CommandContext, CommandResult, LocalCommandResult
@@ -898,6 +899,7 @@ def doctor_command_call(args: str, context: CommandContext) -> LocalCommandResul
             f"{int(observability.get('change_events', 0))} change event(s)"
         ),
         f"**Deferred capabilities:** {', '.join(deferred) if deferred else 'none'}",
+        f"**Software evidence (OSV):** {osv_contract_status()}",
         "**Network/provider checks:** not run; doctor is local and read-only",
     ]
 

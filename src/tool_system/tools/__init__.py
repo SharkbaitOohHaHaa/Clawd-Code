@@ -17,6 +17,7 @@ from .mcp_resources import ListMcpResourcesTool, ReadMcpResourceTool
 from .memory import MemoryTool
 from .misc import PowerShellTool, REPLTool, RemoteTriggerTool, SendMessageTool, TestingPermissionTool
 from .notebook_edit import NotebookEditTool
+from .osv import OsvQueryTool
 from .plan_mode import EnterPlanModeTool, ExitPlanModeTool
 from .qwen_media import QwenMediaAnalyzeTool
 from .read import FileReadTool
@@ -63,6 +64,7 @@ __all__ = [
     "ListMcpResourcesTool",
     "ReadMcpResourceTool",
     "NotebookEditTool",
+    "OsvQueryTool",
     "PowerShellTool",
     "QwenMediaAnalyzeTool",
     "REPLTool",

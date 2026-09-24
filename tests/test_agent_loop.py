@@ -856,6 +856,14 @@ class TestAgentLoop(unittest.TestCase):
         self.assertIsInstance(error, AttributeError)
         self.assertEqual(chunks, [])
 
+    def test_osv_query_summary_shows_status_and_clawd_statement(self):
+        from src.tool_system.agent_loop import summarize_tool_result
+
+        output = {"status": "no_records_found", "statement": "Clawd statement.", "records": [{"summary": "osv text"}]}
+        summary = summarize_tool_result("OsvQuery", output)
+        self.assertEqual(summary, "OsvQuery · no_records_found · Clawd statement.")
+        self.assertNotIn("osv text", summary)
+
     def test_wrong_stream_response_type_surfaces_without_resend(self):
         error, _ = self._run_failing_stream(lambda *args, **kwargs: {"content": "not a ChatResponse"})
         self.assertIsInstance(error, TypeError)
