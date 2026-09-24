@@ -1,5 +1,6 @@
 param(
     [string]$MarkReviewed,
+    [switch]$AcceptRewrittenHistory,
     [switch]$SelfTest
 )
 
@@ -100,6 +101,17 @@ function Get-PathClassification(
         return 'untouched'
     }
     return 'modified'
+}
+
+function Get-HistoryRelation([string]$repoPath, [string]$reviewedSha, [string]$targetSha) {
+    if ($reviewedSha -eq $targetSha) { return 'same' }
+    & git -C $repoPath cat-file -e "${reviewedSha}^{commit}" 2>$null
+    if ($LASTEXITCODE -ne 0) { return 'missing' }
+    & git -C $repoPath merge-base --is-ancestor $reviewedSha $targetSha 2>$null
+    if ($LASTEXITCODE -eq 0) { return 'descendant' }
+    & git -C $repoPath merge-base --is-ancestor $targetSha $reviewedSha 2>$null
+    if ($LASTEXITCODE -eq 0) { return 'older' }
+    return 'rewritten'
 }
 
 function Get-UpstreamChanges([string]$repoPath, [string]$fromSha, [string]$toSha) {
@@ -238,6 +250,25 @@ function Invoke-ClassificationSelfTest {
         if (-not ($changes | Where-Object { $_.CurrentPath -eq 'café.txt' })) { $failures += 'accented filename was not preserved' }
         if (-not ($changes | Where-Object { $_.CurrentPath -eq '模型.md' })) { $failures += 'Chinese filename was not preserved' }
 
+        & git -C $repo checkout -q -b rewritten $sha
+        Set-Content -LiteralPath (Join-Path $repo 'rewritten.txt') -Value 'rewrite' -Encoding UTF8
+        & git -C $repo add -A
+        & git -C $repo commit -q -m rewritten
+        $rewrite = (& git -C $repo rev-parse HEAD).Trim()
+        $relationCases = @(
+            @($sha, $sha, 'same'),
+            @($sha, $target, 'descendant'),
+            @($target, $sha, 'older'),
+            @($target, $rewrite, 'rewritten'),
+            @(('0' * 40), $target, 'missing')
+        )
+        foreach ($case in $relationCases) {
+            $actual = Get-HistoryRelation $repo $case[0] $case[1]
+            if ($actual -ne $case[2]) { $failures += "history relation expected=$($case[2]) actual=$actual" }
+        }
+        $rewrittenChanges = @(Get-UpstreamChanges $repo $target $rewrite)
+        if ($rewrittenChanges.Count -eq 0) { $failures += 'rewritten history produced no comparable changes' }
+
         try {
             $null = Resolve-LivePath $live '../escape.txt'
             $failures += 'path traversal was not rejected'
@@ -246,7 +277,7 @@ function Invoke-ClassificationSelfTest {
         if ($failures.Count -gt 0) {
             throw ($failures -join '; ')
         }
-        Write-Host "Review classifier self-test passed: $($directCases.Count) direct cases + Unicode + rename + deletion + traversal."
+        Write-Host "Review classifier self-test passed: $($directCases.Count) direct cases + Unicode + rename + deletion + history + traversal."
     } finally {
         Remove-Item -LiteralPath $temp -Recurse -Force -ErrorAction SilentlyContinue
     }
@@ -277,6 +308,10 @@ if ($MarkReviewed -and $MarkReviewed -notmatch '^[0-9a-fA-F]{40}$') {
     Write-Error '-MarkReviewed requires the exact 40-character SHA that was reviewed.'
     exit 1
 }
+if ($AcceptRewrittenHistory -and -not $MarkReviewed) {
+    Write-Error '-AcceptRewrittenHistory only applies together with -MarkReviewed <sha>.'
+    exit 1
+}
 
 Write-Host "Fetching $($state.repo):$($state.branch) into the isolated review repository..." -ForegroundColor DarkGray
 & git -C $referencePath fetch origin $state.branch --no-tags --quiet
@@ -293,17 +328,9 @@ if (-not $remote -or $remote.Trim() -notmatch '^[0-9a-f]{40}$') {
 $remote = $remote.Trim().ToLowerInvariant()
 $target = if ($MarkReviewed) { $MarkReviewed.Trim().ToLowerInvariant() } else { $remote }
 
-foreach ($sha in @($reviewed, $target)) {
-    & git -C $referencePath cat-file -e "${sha}^{commit}" 2>$null
-    if ($LASTEXITCODE -ne 0) {
-        Write-Error "Required commit is unavailable in the reference repository: $sha"
-        exit 1
-    }
-}
-
-& git -C $referencePath merge-base --is-ancestor $reviewed $target 2>$null
+& git -C $referencePath cat-file -e "${target}^{commit}" 2>$null
 if ($LASTEXITCODE -ne 0) {
-    Write-Error 'The requested reviewed SHA is not descended from the current reviewed SHA.'
+    Write-Error "Required commit is unavailable in the reference repository: $target"
     exit 1
 }
 & git -C $referencePath merge-base --is-ancestor $target $remote 2>$null
@@ -312,7 +339,45 @@ if ($LASTEXITCODE -ne 0) {
     exit 1
 }
 
-if ($target -eq $reviewed) {
+$relation = Get-HistoryRelation $referencePath $reviewed $target
+if ($relation -eq 'older') {
+    Write-Error "The requested SHA $($target.Substring(0,12)) is older than the already-reviewed $($reviewed.Substring(0,12)). Nothing was changed."
+    exit 1
+}
+$rewritten = ($relation -eq 'rewritten' -or $relation -eq 'missing')
+if ($rewritten) {
+    Write-Host ""
+    if ($relation -eq 'missing') {
+        Write-Host 'The last reviewed commit is not available (upstream history may have been rewritten).' -ForegroundColor Yellow
+        Write-Host "The commit you last reviewed ($($reviewed.Substring(0,12))) is not in the review repository, so changed files cannot be listed." -ForegroundColor Yellow
+        Write-Host "Review upstream $($target.Substring(0,12)) manually before accepting it." -ForegroundColor Yellow
+    } else {
+        Write-Host 'Upstream history was rewritten (force-push or rebase).' -ForegroundColor Yellow
+        Write-Host "The commit you last reviewed ($($reviewed.Substring(0,12))) is no longer part of upstream $($state.branch)." -ForegroundColor Yellow
+        Write-Host 'The file list below compares what you reviewed directly with the new upstream commit.' -ForegroundColor Yellow
+    }
+    if ($MarkReviewed -and -not $AcceptRewrittenHistory) {
+        Write-Error "Not marked. After reviewing, re-run with: -MarkReviewed $target -AcceptRewrittenHistory"
+        exit 1
+    }
+}
+
+if ($relation -eq 'missing') {
+    if ($MarkReviewed) {
+        Write-ReviewState $state $target
+        Write-Host ""
+        Write-Host "Marked exactly $($target.Substring(0,12)) as reviewed (rewritten history accepted)." -ForegroundColor Green
+        Write-Host 'No live Clawd files were copied, merged, installed, or changed.' -ForegroundColor DarkGray
+        Show-AuxiliaryStatus
+        exit 0
+    }
+    Write-Host ""
+    Write-Host "After a manual review, re-run with -MarkReviewed $target -AcceptRewrittenHistory to accept exactly this SHA." -ForegroundColor DarkGray
+    Show-AuxiliaryStatus
+    exit 1
+}
+
+if ($relation -eq 'same') {
     Write-Host "Clawd upstream target is already reviewed at $($target.Substring(0,12))." -ForegroundColor Green
     if ($remote -ne $target) {
         Write-Host "A newer upstream head remains available at $($remote.Substring(0,12))." -ForegroundColor Yellow
@@ -359,7 +424,11 @@ if ($MarkReviewed) {
 } else {
     Write-Host ""
     Write-Host 'Review only: no live Clawd files or review state were changed.' -ForegroundColor DarkGray
-    Write-Host "After review, re-run with -MarkReviewed $target to mark exactly this SHA." -ForegroundColor DarkGray
+    if ($rewritten) {
+        Write-Host "After review, re-run with -MarkReviewed $target -AcceptRewrittenHistory to mark exactly this SHA." -ForegroundColor DarkGray
+    } else {
+        Write-Host "After review, re-run with -MarkReviewed $target to mark exactly this SHA." -ForegroundColor DarkGray
+    }
 }
 
 Show-AuxiliaryStatus

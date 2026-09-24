@@ -5,8 +5,11 @@ from __future__ import annotations
 import json
 import base64
 import os
+import re
 from pathlib import Path
 from typing import Any, Optional
+
+_ENV_NAME_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
 def get_config_path() -> Path:
@@ -38,7 +41,7 @@ def load_secrets_env() -> Path | None:
             name, value = line.split("=", 1)
             name = name.strip()
             value = value.strip()
-            if not name:
+            if not _ENV_NAME_PATTERN.fullmatch(name):
                 continue
             if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
                 value = value[1:-1]

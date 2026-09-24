@@ -7,8 +7,8 @@ set "CLAWD_SKILL_TRUST_DIR=%CLAWD_ROOT%Clawd Codex Home\.clawd\development-pack"
 set "CLAWD_MEMORY_DIR=%CLAWD_ROOT%Clawd Codex Home\.clawd\memory"
 set "CLAWD_MEMORY_CONTEXT_CHARS=8000"
 if exist "%CLAWD_ROOT%Secrets\.env" (
-  for /f "usebackq eol=# tokens=1,* delims==" %%A in ("%CLAWD_ROOT%Secrets\.env") do (
-    if not "%%A"=="" set "%%A=%%~B"
+  for /f "usebackq tokens=1,* delims==" %%A in (`findstr /b /r /c:"[ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_][ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_]*=" "%CLAWD_ROOT%Secrets\.env"`) do (
+    set "%%A=%%~B"
   )
 )
 cd /d "%CLAWD_ROOT%Clawd Codex Workspace"

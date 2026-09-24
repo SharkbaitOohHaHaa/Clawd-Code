@@ -22,6 +22,7 @@ from src.config import (
     _encode_api_key,
     _decode_api_key,
     _provider_api_key_env,
+    load_secrets_env,
 )
 
 
@@ -448,6 +449,54 @@ class TestDefaultProvider(unittest.TestCase):
             with patch('src.config.get_config_path', return_value=config_path):
                 provider = get_default_provider()
                 self.assertEqual(provider, "anthropic")
+
+
+class TestLoadSecretsEnv(unittest.TestCase):
+    """Test loading the external secrets file (fake values only)."""
+
+    def _load(self, content: bytes, preset: dict[str, str] | None = None) -> dict[str, str]:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            env_file = Path(temp_dir) / ".env"
+            env_file.write_bytes(content)
+            environ = {"CLAWD_SECRETS_FILE": str(env_file), **(preset or {})}
+            with patch.dict(os.environ, environ, clear=True):
+                self.assertEqual(load_secrets_env(), env_file)
+                return dict(os.environ)
+
+    def test_utf8_bom_does_not_corrupt_first_name(self):
+        loaded = self._load(b"\xef\xbb\xbfFIRST_KEY=fake-one\r\nSECOND_KEY=fake-two\r\n")
+        self.assertEqual(loaded.get("FIRST_KEY"), "fake-one")
+        self.assertEqual(loaded.get("SECOND_KEY"), "fake-two")
+        self.assertFalse(any(name.startswith("﻿") for name in loaded))
+
+    def test_comments_and_invalid_names_are_skipped(self):
+        loaded = self._load(
+            b"#HASH_KEY=nope\n"
+            b"  #INDENTED_KEY=nope\n"
+            b";SEMI_KEY=nope\n"
+            b"9DIGIT_KEY=nope\n"
+            b"BAD NAME=nope\n"
+            b"=nope\n"
+            b"VALID_KEY=fake\n"
+        )
+        extra = set(loaded) - {"CLAWD_SECRETS_FILE"}
+        self.assertEqual(extra, {"VALID_KEY"})
+
+    def test_export_quotes_equals_and_spacing(self):
+        loaded = self._load(
+            b"export EXPORTED_KEY=fake-exported\n"
+            b'QUOTED_KEY="fake quoted"\n'
+            b"EQUALS_KEY=a=b=c\n"
+            b"SPACED_KEY = fake-spaced \n"
+        )
+        self.assertEqual(loaded.get("EXPORTED_KEY"), "fake-exported")
+        self.assertEqual(loaded.get("QUOTED_KEY"), "fake quoted")
+        self.assertEqual(loaded.get("EQUALS_KEY"), "a=b=c")
+        self.assertEqual(loaded.get("SPACED_KEY"), "fake-spaced")
+
+    def test_existing_environment_values_are_not_overridden(self):
+        loaded = self._load(b"PRESET_KEY=from-file\n", preset={"PRESET_KEY": "from-env"})
+        self.assertEqual(loaded.get("PRESET_KEY"), "from-env")
 
 
 if __name__ == '__main__':

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 import pathlib
-import re
 import shutil
 import subprocess
 import tempfile
@@ -42,7 +41,9 @@ class UpdateScriptContractTests(unittest.TestCase):
         )
         self.assertIn(async_line, lower)
         self.assertLess(lower.index("check-clawdupdate.ps1"), lower.index("clawd.exe"))
-        self.assertIn('for /f "usebackq eol=# tokens=1,* delims=="', lower)
+        self.assertIn('for /f "usebackq tokens=1,* delims=="', lower)
+        self.assertIn("findstr /b /r /c:", lower)
+        self.assertNotIn("eol=#", lower)
         self.assertNotIn("%%a:~0,1", lower)
 
     def test_review_preserves_status_unicode_and_rename_information(self) -> None:
@@ -68,9 +69,19 @@ class UpdateScriptContractTests(unittest.TestCase):
         self.assertIn("$target = if ($MarkReviewed)", review)
         self.assertIn("Write-ReviewState $state $target", review)
         self.assertNotIn("Write-ReviewState $state $remote", review)
-        self.assertIn("merge-base --is-ancestor $reviewed $target", review)
+        self.assertIn("merge-base --is-ancestor $reviewedSha $targetSha", review)
+        self.assertIn("if ($relation -eq 'older')", review)
         self.assertIn("merge-base --is-ancestor $target $remote", review)
         self.assertIn("re-run with -MarkReviewed $target", review)
+
+    def test_rewritten_upstream_history_requires_explicit_acceptance(self) -> None:
+        review = self._read("Review-ClawdUpdate.ps1")
+        self.assertIn("[switch]$AcceptRewrittenHistory", review)
+        self.assertIn("function Get-HistoryRelation", review)
+        self.assertIn("if ($MarkReviewed -and -not $AcceptRewrittenHistory)", review)
+        self.assertIn("-AcceptRewrittenHistory only applies together with -MarkReviewed", review)
+        self.assertIn("Upstream history was rewritten (force-push or rebase).", review)
+        self.assertNotIn("is not descended from the current reviewed SHA", review)
 
     def test_review_state_update_is_state_only(self) -> None:
         review = self._read("Review-ClawdUpdate.ps1")
@@ -119,52 +130,80 @@ class UpdateScriptContractTests(unittest.TestCase):
             self.assertIn(marker, output)
 
     @unittest.skipUnless(os.name == "nt", "Windows batch behavior")
-    def test_windows_env_parser_ignores_hash_comments(self) -> None:
+    def test_windows_env_parser_loads_only_valid_names(self) -> None:
         launcher = self._read("Start Clawd Codex.cmd")
         lines = launcher.splitlines()
-        for_line = next(line for line in lines if 'for /f "usebackq eol=# tokens=1,* delims=="' in line)
+        for_line = next(line for line in lines if "findstr /b /r /c:" in line)
         body_line = next(line for line in lines if 'set "%%A=%%~B"' in line)
+        watched = (
+            "BOM_KEY HASH_KEY SEMI_KEY INDENTED_KEY TABBED_KEY EXPORTED_KEY "
+            "SPACED_KEY DIGIT_KEY LIVE_KEY EQ_KEY QUOTED_KEY SPECIAL_KEY"
+        )
 
-        with tempfile.TemporaryDirectory(prefix="clawd-env-parser-") as tmp:
-            root = pathlib.Path(tmp)
-            env_file = root / "fake.env"
-            env_file.write_text(
-                "#OLD_KEY=should-not-load\nLIVE_KEY=works\nEMPTY_VALUE=\n",
-                encoding="ascii",
-            )
-            batch = root / "test.cmd"
-            adapted_for = re.sub(
-                r'\("%CLAWD_ROOT%Secrets\\\.env"\)',
-                '("%FAKE_ENV%")',
-                for_line.strip(),
-                count=1,
-            )
-            batch.write_text(
-                "\r\n".join(
-                    [
-                        "@echo off",
-                        f'set "FAKE_ENV={env_file}"',
-                        adapted_for,
-                        body_line.strip(),
-                        ")",
-                        "if defined #OLD_KEY (echo COMMENT_LOADED=YES) else (echo COMMENT_LOADED=NO)",
-                        'if "%LIVE_KEY%"=="works" (echo LIVE_KEY=PASS) else (echo LIVE_KEY=FAIL)',
-                    ]
+        for newline in ("\r\n", "\n"):
+            with self.subTest(newline=repr(newline)), tempfile.TemporaryDirectory(
+                prefix="clawd-env & parser-"
+            ) as tmp:
+                root = pathlib.Path(tmp)
+                env_file = root / "fake.env"
+                env_file.write_bytes(
+                    b"\xef\xbb\xbf"
+                    + newline.join(
+                        [
+                            "BOM_KEY=fake-bom",
+                            "#HASH_KEY=nope",
+                            ";SEMI_KEY=nope",
+                            "  #INDENTED_KEY=nope",
+                            "\t#TABBED_KEY=nope",
+                            "export EXPORTED_KEY=nope",
+                            "SPACED_KEY = nope",
+                            "9DIGIT_KEY=nope",
+                            "LIVE_KEY=works",
+                            "EQ_KEY=a=b=c",
+                            'QUOTED_KEY="quoted value"',
+                            "SPECIAL_KEY=a&b|c<d>e^f%g!h",
+                        ]
+                    ).encode("ascii")
                 )
-                + "\r\n",
-                encoding="ascii",
-            )
-            result = subprocess.run(
-                ["cmd.exe", "/d", "/c", str(batch)],
-                text=True,
-                capture_output=True,
-                timeout=10,
-                check=False,
-            )
-            output = result.stdout + result.stderr
-            self.assertEqual(result.returncode, 0, output)
-            self.assertIn("COMMENT_LOADED=NO", output)
-            self.assertIn("LIVE_KEY=PASS", output)
+                batch = root / "test.cmd"
+                adapted_for = for_line.strip().replace(
+                    "%CLAWD_ROOT%Secrets\\.env", "%FAKE_ENV%"
+                )
+                self.assertIn("%FAKE_ENV%", adapted_for)
+                batch.write_text(
+                    "\r\n".join(
+                        [
+                            "@echo off",
+                            f'set "FAKE_ENV={env_file}"',
+                            adapted_for,
+                            body_line.strip(),
+                            ")",
+                            f'set | findstr /i "{watched}"',
+                        ]
+                    )
+                    + "\r\n",
+                    encoding="ascii",
+                )
+                # A string (not a list) keeps the doubled quotes intact for cmd.exe.
+                result = subprocess.run(
+                    f'cmd.exe /d /c ""{batch}""',
+                    text=True,
+                    capture_output=True,
+                    timeout=10,
+                    check=False,
+                )
+                output = result.stdout + result.stderr
+                loaded = [line for line in result.stdout.splitlines() if line.strip()]
+                self.assertEqual(
+                    sorted(loaded),
+                    [
+                        "EQ_KEY=a=b=c",
+                        "LIVE_KEY=works",
+                        "QUOTED_KEY=quoted value",
+                        "SPECIAL_KEY=a&b|c<d>e^f%g!h",
+                    ],
+                    output,
+                )
 
 
 if __name__ == "__main__":
