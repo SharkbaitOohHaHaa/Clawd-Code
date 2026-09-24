@@ -769,7 +769,16 @@ class EvidenceMeaningTests(_Base):
         result = OsvRig([http_response(200, as_json(payload))]).run({"operation": "vuln", "vuln_id": "GHSA-aaaa-bbbb-cccc"})
         self.assertEqual(result["status"], "records_found")
         self.assertEqual(result["records"][0]["withdrawn"], "2026-03-01T00:00:00Z")
-        self.assertIn("withdrawn", result["statement"])
+        self.assertIn("OSV marks 1 of the shown record(s) as withdrawn.", result["notes"])
+        # The fixed §5 records_found statement is unchanged for withdrawn advisories.
+        self.assertEqual(
+            result["statement"],
+            "OSV returned 1 known vulnerability record(s) for advisory GHSA-aaaa-bbbb-cccc at "
+            f"{result['observed_at']} (complete response); 1 of 1 shown. The records are shown as OSV "
+            "supplied them; OSV's version matching is its own interpretation. "
+            "This evidence does not approve any change.",
+        )
+        self.assertNotIn("withdrawn", result["statement"])
 
     def test_g4_g5_severity_and_ranges_pass_through(self) -> None:
         ranges = [{"type": "ECOSYSTEM", "events": [{"introduced": "0"}, {"last_affected": "2.9"}, {"limit": "*"}]}]
