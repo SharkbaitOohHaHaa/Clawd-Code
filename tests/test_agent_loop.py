@@ -786,6 +786,80 @@ class TestAgentLoop(unittest.TestCase):
         self.assertEqual(result.response_text, "Hello from fallback!")
         provider.chat.assert_called_once()
 
+    def _run_failing_stream(self, stream_side_effect, on_text_chunk=None):
+        conversation = Conversation()
+        conversation.add_user_message("Say hello")
+        provider = MagicMock()
+        provider.chat_stream_response.side_effect = stream_side_effect
+        provider.chat.side_effect = AssertionError("chat() must not resend after a streaming failure")
+        chunks: list[str] = []
+        with self.assertRaises(Exception) as caught:
+            run_agent_loop(
+                conversation=conversation,
+                provider=provider,
+                tool_registry=self.registry,
+                tool_context=self.context,
+                stream=True,
+                verbose=False,
+                on_text_chunk=on_text_chunk or chunks.append,
+            )
+        provider.chat.assert_not_called()
+        provider.chat_stream_response.assert_called_once()
+        return caught.exception, chunks
+
+    def test_stream_failure_before_any_chunk_surfaces_without_resend(self):
+        class ProviderStatusError(RuntimeError):
+            status_code = 529
+
+        error, chunks = self._run_failing_stream(ProviderStatusError("overloaded"))
+        self.assertIsInstance(error, ProviderStatusError)
+        self.assertEqual(chunks, [])
+
+    def test_stream_failure_after_chunk_surfaces_without_resend_or_duplicate_text(self):
+        def stream_then_fail(messages, tools=None, on_text_chunk=None, **kwargs):
+            on_text_chunk("partial answer")
+            raise ConnectionError("stream dropped")
+
+        error, chunks = self._run_failing_stream(stream_then_fail)
+        self.assertIsInstance(error, ConnectionError)
+        self.assertEqual(chunks, ["partial answer"])
+
+    def test_authentication_error_during_stream_is_not_resent(self):
+        class StatusAuthError(RuntimeError):
+            status_code = 401
+
+        error, _ = self._run_failing_stream(StatusAuthError("rejected"))
+        self.assertIsInstance(error, StatusAuthError)
+
+    def test_not_implemented_after_a_provider_chunk_is_not_treated_as_unsupported(self):
+        def stream_then_not_implemented(messages, tools=None, on_text_chunk=None, **kwargs):
+            on_text_chunk("partial")
+            raise NotImplementedError("late")
+
+        error, chunks = self._run_failing_stream(stream_then_not_implemented)
+        self.assertIsInstance(error, NotImplementedError)
+        self.assertEqual(chunks, ["partial"])
+
+    def test_display_callback_not_implemented_is_not_treated_as_unsupported(self):
+        def stream_one_chunk(messages, tools=None, on_text_chunk=None, **kwargs):
+            on_text_chunk("hello")
+            return ChatResponse(content="hello", model="m", usage={}, finish_reason="stop", tool_uses=None)
+
+        def display_raises(chunk: str) -> None:
+            raise NotImplementedError("display failed")
+
+        error, _ = self._run_failing_stream(stream_one_chunk, on_text_chunk=display_raises)
+        self.assertIsInstance(error, NotImplementedError)
+
+    def test_attribute_error_during_stream_is_not_treated_as_unsupported(self):
+        error, chunks = self._run_failing_stream(AttributeError("provider bug"))
+        self.assertIsInstance(error, AttributeError)
+        self.assertEqual(chunks, [])
+
+    def test_wrong_stream_response_type_surfaces_without_resend(self):
+        error, _ = self._run_failing_stream(lambda *args, **kwargs: {"content": "not a ChatResponse"})
+        self.assertIsInstance(error, TypeError)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1422,31 +1422,98 @@ class TestREPL(unittest.TestCase):
                         for args, _kwargs in repl.console.print.call_args_list
                     ))
 
-    def test_chat_stream_falls_back_to_agent_loop_on_stream_init_failure(self):
-        """If real streaming fails before any chunk, fall back to the stable agent loop."""
+    def _direct_failure_repl(self, *, stream: bool, provider: Mock):
         with patch('src.config.get_config_path', return_value=self.config_dir / "config.json"):
             with patch('src.repl.core.Session.create') as mock_session_factory:
                 mock_session = Mock()
                 mock_session.conversation = Conversation()
                 mock_session_factory.return_value = mock_session
-
                 with patch('src.repl.core.get_provider_class') as mock_provider_class:
-                    mock_provider = Mock()
-                    mock_provider.model = "glm-4.5"
-                    # Structured streaming is unavailable; the legacy stream then fails before a chunk.
-                    mock_provider.chat_stream_response.side_effect = NotImplementedError
-                    mock_provider.chat_stream.side_effect = RuntimeError("stream unavailable")
-                    mock_provider_class.return_value = Mock(return_value=mock_provider)
+                    mock_provider_class.return_value = Mock(return_value=provider)
+                    repl = ClawdREPL(provider_name="glm", stream=stream)
+        repl.console.print = Mock()
+        return repl
 
-                    repl = ClawdREPL(provider_name="glm", stream=True)
-                    repl.console.print = Mock()
+    def _assert_direct_failure_surfaced(self, repl, mock_agent_loop) -> None:
+        mock_agent_loop.assert_not_called()
+        printed = " ".join(str(call.args[0]) for call in repl.console.print.call_args_list if call.args)
+        self.assertIn("Error:", printed)
+        self.assertIn("The request failed. Clawd did not issue a fallback retry.", printed)
 
-                    with patch('src.repl.core.run_agent_loop') as mock_agent_loop:
-                        mock_agent_loop.return_value = Mock(response_text="fallback", usage=None, num_turns=1)
-                        repl.chat("你好呀")
+    def test_chat_stream_legacy_failure_surfaces_without_agent_loop_request(self):
+        """A real legacy-stream failure is shown; it never turns into a second (agent) request."""
+        mock_provider = Mock()
+        mock_provider.model = "glm-4.5"
+        # Structured streaming is unavailable; the legacy stream then fails before a chunk.
+        mock_provider.chat_stream_response.side_effect = NotImplementedError
+        mock_provider.chat_stream.side_effect = RuntimeError("stream unavailable")
+        repl = self._direct_failure_repl(stream=True, provider=mock_provider)
 
-                    mock_provider.chat_stream.assert_called_once()
-                    mock_agent_loop.assert_called_once()
+        with patch('src.repl.core.run_agent_loop') as mock_agent_loop:
+            repl.chat("你好呀")
+
+        mock_provider.chat_stream.assert_called_once()
+        self._assert_direct_failure_surfaced(repl, mock_agent_loop)
+
+    def test_direct_non_stream_failure_surfaces_without_agent_loop_request(self):
+        mock_provider = Mock()
+        mock_provider.model = "glm-4.5"
+        mock_provider.chat.side_effect = RuntimeError("service unavailable")
+        repl = self._direct_failure_repl(stream=False, provider=mock_provider)
+
+        with patch('src.repl.core.run_agent_loop') as mock_agent_loop:
+            repl.chat("你好呀")
+
+        mock_provider.chat.assert_called_once()
+        self._assert_direct_failure_surfaced(repl, mock_agent_loop)
+
+    def test_direct_stream_failure_before_chunk_surfaces_without_agent_loop_request(self):
+        mock_provider = Mock()
+        mock_provider.model = "glm-4.5"
+        mock_provider.chat_stream_response.side_effect = RuntimeError("overloaded")
+        repl = self._direct_failure_repl(stream=True, provider=mock_provider)
+
+        with patch('src.repl.core.run_agent_loop') as mock_agent_loop:
+            repl.chat("你好呀")
+
+        mock_provider.chat_stream_response.assert_called_once()
+        mock_provider.chat_stream.assert_not_called()
+        mock_provider.chat.assert_not_called()
+        self._assert_direct_failure_surfaced(repl, mock_agent_loop)
+
+    def test_direct_stream_not_implemented_after_chunk_is_not_a_fallback(self):
+        def stream_then_not_implemented(messages, tools=None, on_text_chunk=None, **kwargs):
+            on_text_chunk("partial")
+            raise NotImplementedError("late")
+
+        mock_provider = Mock()
+        mock_provider.model = "glm-4.5"
+        mock_provider.chat_stream_response.side_effect = stream_then_not_implemented
+        repl = self._direct_failure_repl(stream=True, provider=mock_provider)
+
+        with patch('src.repl.core.run_agent_loop') as mock_agent_loop:
+            repl.chat("你好呀")
+
+        mock_provider.chat_stream.assert_not_called()
+        mock_provider.chat.assert_not_called()
+        self._assert_direct_failure_surfaced(repl, mock_agent_loop)
+
+    def test_direct_stream_attribute_error_is_never_treated_as_unsupported(self):
+        """AttributeError (raised inside the provider, or a missing method) must surface."""
+        raising = Mock()
+        raising.model = "glm-4.5"
+        raising.chat_stream_response.side_effect = AttributeError("provider bug")
+        missing_method = Mock(spec=["model", "chat", "chat_stream", "get_available_models"])
+        missing_method.model = "glm-4.5"
+
+        for label, provider in (("raised inside provider", raising), ("missing method", missing_method)):
+            with self.subTest(label):
+                repl = self._direct_failure_repl(stream=True, provider=provider)
+                with patch('src.repl.core.run_agent_loop') as mock_agent_loop:
+                    repl.chat("你好呀")
+                provider.chat_stream.assert_not_called()
+                provider.chat.assert_not_called()
+                self._assert_direct_failure_surfaced(repl, mock_agent_loop)
 
     def test_handle_command_slash_shows_commands_and_skills(self):
         skills_dir = Path(self.temp_dir) / "skills"

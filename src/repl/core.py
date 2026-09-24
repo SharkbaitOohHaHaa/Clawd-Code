@@ -1275,14 +1275,16 @@ class ClawdREPL:
         return not any(marker in text for marker in code_task_markers)
 
     def _direct_response(self, on_text_chunk=None):
+        # A provider failure here surfaces to the user; it never falls through to
+        # the agent route, which would send a second request. Only a local payload
+        # failure (nothing sent yet) still hands over to the agent route.
+        try:
+            api_messages, call_kwargs = self._build_direct_stream_payload()
+        except Exception:
+            return None
+
         if not self.stream:
-            try:
-                api_messages, call_kwargs = self._build_direct_stream_payload()
-                response = self.provider.chat(api_messages, tools=None, **call_kwargs)
-            except Exception as exc:
-                if _is_provider_authentication_error(exc):
-                    raise
-                return None
+            response = self.provider.chat(api_messages, tools=None, **call_kwargs)
             full_response = getattr(response, "content", "") or ""
             if not full_response:
                 return None
@@ -1294,44 +1296,31 @@ class ClawdREPL:
         def capture_chunk(chunk: str) -> None:
             if not chunk:
                 return
+            # Recorded before display so a display error is never mistaken for "unsupported".
             streamed_chunks.append(chunk)
             if on_text_chunk is not None:
                 on_text_chunk(chunk)
 
         try:
-            api_messages, call_kwargs = self._build_direct_stream_payload()
             response = self.provider.chat_stream_response(
                 api_messages,
                 tools=None,
                 on_text_chunk=capture_chunk,
                 **call_kwargs,
             )
-        except (NotImplementedError, AttributeError):
+        except NotImplementedError:
+            if streamed_chunks:
+                raise
             # Provider has no structured stream result. Preserve the old stream path,
             # but usage will be unavailable for this direct response.
-            try:
-                api_messages, call_kwargs = self._build_direct_stream_payload()
-                for chunk in self.provider.chat_stream(api_messages, tools=None, **call_kwargs):
-                    capture_chunk(chunk)
-            except Exception as exc:
-                if _is_provider_authentication_error(exc):
-                    raise
-                if not streamed_chunks:
-                    return None
-                raise
+            api_messages, call_kwargs = self._build_direct_stream_payload()
+            for chunk in self.provider.chat_stream(api_messages, tools=None, **call_kwargs):
+                capture_chunk(chunk)
             if not streamed_chunks:
                 return None
             full_response = "".join(streamed_chunks)
             self.session.conversation.add_assistant_message(full_response)
             return {"content": full_response, "usage": {}}
-        except Exception as exc:
-            # Authentication failures must reach the recovery path immediately;
-            # other failures may use the existing fallback only before output.
-            if _is_provider_authentication_error(exc):
-                raise
-            if not streamed_chunks:
-                return None
-            raise
 
         full_response = getattr(response, "content", "") or "".join(streamed_chunks)
         if not full_response:
@@ -1733,6 +1722,7 @@ class ClawdREPL:
             else:
                 # Generic error handling
                 self.console.print(f"\n[red]Error: {e}[/red]")
+                self.console.print("[dim]The request failed. Clawd did not issue a fallback retry.[/dim]")
                 import traceback
                 traceback.print_exc()
 

@@ -160,23 +160,35 @@ def _call_provider_for_turn(
 ) -> tuple[Any, bool]:
     """Call the provider, preferring structured streaming when available.
 
+    Only a provider that reports structured streaming as unsupported
+    (NotImplementedError) before any chunk arrives falls back to chat(). Every
+    other failure surfaces without a second request.
+
     Returns (response, streamed_live_text).
     """
     if stream:
+        provider_chunk_received = False
+
+        def forward_chunk(chunk: str) -> None:
+            nonlocal provider_chunk_received
+            # Mark before display so a display error is never mistaken for "unsupported".
+            provider_chunk_received = True
+            if on_text_chunk is not None:
+                on_text_chunk(chunk)
+
         try:
             response = provider.chat_stream_response(
                 api_messages,
-                on_text_chunk=on_text_chunk,
+                on_text_chunk=forward_chunk,
                 **call_kwargs,
             )
+        except NotImplementedError:
+            if provider_chunk_received:
+                raise
+        else:
             if not isinstance(response, ChatResponse):
                 raise TypeError("Structured streaming must return ChatResponse")
             return response, True
-        except NotImplementedError:
-            pass
-        except Exception:
-            # Preserve existing stable behavior if streaming is unsupported or fails.
-            pass
 
     response = provider.chat(api_messages, **call_kwargs)
     return response, False
