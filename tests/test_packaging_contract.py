@@ -116,10 +116,13 @@ class PackagingContractTests(unittest.TestCase):
         self.assertIn("pull_request:", workflow)
         self.assertIn("workflow_dispatch:", workflow)
         self.assertNotIn("pull_request_target:", workflow)
-        self.assertEqual(workflow.count("persist-credentials: false"), 2)
-        self.assertEqual(workflow.count("enable-cache: false"), 2)
+        self.assertEqual(workflow.count("persist-credentials: false"), 3)
+        self.assertEqual(workflow.count("enable-cache: false"), 3)
         self.assertIn("timeout-minutes: 30", workflow)
         self.assertIn("timeout-minutes: 15", workflow)
+        self.assertIn("updater-windows:", workflow)
+        self.assertIn("runs-on: windows-latest", workflow)
+        self.assertIn("      - updater-windows", workflow)
 
         uses = re.findall(r"uses:\s+([^@\s]+)@([0-9a-f]{40})", workflow)
         self.assertTrue(uses)
@@ -133,6 +136,7 @@ class PackagingContractTests(unittest.TestCase):
             "uv run --locked pytest -q",
             "uv run --locked ruff check src tests",
             "uv run --locked mypy",
+            "uv run --locked python -m unittest tests.test_update_scripts",
             "uv build --out-dir dist",
             "uv run --locked python -m twine check dist/*",
         ):
