@@ -798,7 +798,59 @@ class TestREPL(unittest.TestCase):
                 "ordinary permission",
                 None,
             )
-        self.assertTrue(allowed)
+        self.assertFalse(allowed)
+
+    def _permission_prompt_repl(self):
+        with patch('src.config.get_config_path', return_value=self.config_dir / "config.json"):
+            with patch('src.repl.core.Session.create'):
+                with patch('src.repl.core.get_provider_class') as mock_provider_class:
+                    mock_provider = Mock()
+                    mock_provider.model = "glm-4.5"
+                    mock_provider_class.return_value = mock_provider
+                    repl = ClawdREPL(provider_name="glm")
+        repl.console = Mock()
+        return repl
+
+    def _printed(self, repl) -> str:
+        return " ".join(str(call.args[0]) for call in repl.console.print.call_args_list if call.args)
+
+    def test_every_permission_ask_requires_explicit_choice(self):
+        repl = self._permission_prompt_repl()
+        # Ordinary menu: 1=Yes, 2=No.
+        cases = {
+            "": False, "   ": False, "y": True, "Y": True, "yes": True, "YES": True,
+            "1": True, "n": False, "no": False, "2": False, "x": False, "3": False, "e": False,
+        }
+        for value, expected in cases.items():
+            with self.subTest(value=value), patch("builtins.input", return_value=value):
+                repl.console.reset_mock()
+                allowed, _ = repl._handle_permission_request("Read", "ordinary permission", None)
+                self.assertIs(allowed, expected)
+                printed = self._printed(repl)
+                if value.strip() == "":
+                    self.assertIn("No choice entered — denied.", printed)
+                elif not expected and value not in ("n", "no", "2"):
+                    self.assertIn("Invalid choice — denied.", printed)
+                else:
+                    self.assertNotIn("denied.", printed)
+
+    def test_enable_setting_menu_maps_displayed_numbers(self):
+        docs_message = "Writing documentation files is blocked unless allow_docs is enabled"
+        # Enable menu: 1=Enable, 2=Yes, 3=No.
+        cases = {
+            "": (False, False), "   ": (False, False), "1": (True, True), "e": (True, True),
+            "2": (True, False), "y": (True, False), "3": (False, False), "n": (False, False),
+            "4": (False, False),
+        }
+        for value, (expected_allowed, expected_enabled) in cases.items():
+            with self.subTest(value=value):
+                repl = self._permission_prompt_repl()
+                repl.tool_context.permission_context.allow_docs = False
+                repl.tool_context.permission_context.allow_docs_locked_off = False
+                with patch("builtins.input", return_value=value):
+                    allowed, _ = repl._handle_permission_request("Write", docs_message, None)
+                self.assertIs(allowed, expected_allowed)
+                self.assertIs(repl.tool_context.permission_context.allow_docs, expected_enabled)
 
     def test_project_permission_policy_lock_prevents_enabling_allow_docs(self):
         with patch('src.config.get_config_path', return_value=self.config_dir / "config.json"):

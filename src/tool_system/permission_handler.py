@@ -145,19 +145,24 @@ class InteractivePermissionHandler:
         # Get user choice
         choice = self._prompt("Select option> ").strip().lower()
 
-        # Parse choice
-        if choice in ("1", "y", "yes", ""):
+        # Every ask needs an explicit choice; numbers map to the options displayed above.
+        displayed = {str(i + 1): opt for i, opt in enumerate(options)}
+        selected = displayed.get(choice, choice)
+
+        if selected in ("y", "yes"):
             return PermissionBehavior.ALLOW, permission_result.updated_input
-        elif choice in ("2", "n", "no"):
+        if selected in ("n", "no"):
             return PermissionBehavior.DENY, None
-        elif choice == "e" and "e" in options:
+        if selected == "e" and "e" in options:
             # User chose to enable the setting
             self._enable_setting(permission_result, context)
             return PermissionBehavior.ALLOW, permission_result.updated_input
+
+        if not choice:
+            self._print("[dim]No choice entered — denied.[/dim]")
         else:
-            # Default to deny for invalid input
-            self._print("[dim]Invalid choice, defaulting to deny.[/dim]")
-            return PermissionBehavior.DENY, None
+            self._print("[dim]Invalid choice — denied.[/dim]")
+        return PermissionBehavior.DENY, None
 
     def _can_enable_setting(
         self,

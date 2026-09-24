@@ -438,8 +438,6 @@ class ClawdREPL:
                 can_enable_setting = True
                 setting_to_enable = "allow_docs"
 
-        require_explicit_yes = suggestion == "require-explicit-yes"
-
         # Build options
         options: list[tuple[str, str]] = [
             ("y", "Yes, allow this action"),
@@ -456,33 +454,22 @@ class ClawdREPL:
         # Get input - use standard input() which works after stopping status
         choice = input("Select option> ").strip().lower()
 
-        # Parse choice based on the actual displayed options
-        if can_enable_setting:
-            # Menu: 1=Enable, 2=Yes, 3=No
-            if choice in ("1", "e", "enable"):
-                self._enable_permission_setting(setting_to_enable)
-                return True, False
-            elif choice in (
-                ("2", "y", "yes")
-                if require_explicit_yes
-                else ("2", "y", "yes", "")
-            ):
-                return True, False
-            elif choice in ("3", "n", "no"):
-                return False, False
-        else:
-            # Menu: 1=Yes, 2=No
-            if choice in (
-                ("1", "y", "yes")
-                if require_explicit_yes
-                else ("1", "y", "yes", "")
-            ):
-                return True, False
-            elif choice in ("2", "n", "no"):
-                return False, False
+        # Every ask needs an explicit choice; numbers map to the options displayed above.
+        displayed = {str(i): key for i, (key, _desc) in enumerate(options, start=1)}
+        selected = displayed.get(choice, choice)
 
-        # Default to deny for invalid input
-        self.console.print("[dim]Invalid choice, defaulting to deny.[/dim]")
+        if can_enable_setting and selected in ("e", "enable"):
+            self._enable_permission_setting(setting_to_enable)
+            return True, False
+        if selected in ("y", "yes"):
+            return True, False
+        if selected in ("n", "no"):
+            return False, False
+
+        if not choice:
+            self.console.print("[dim]No choice entered — denied.[/dim]")
+        else:
+            self.console.print("[dim]Invalid choice — denied.[/dim]")
         return False, False
 
     def _enable_permission_setting(self, setting_name: str | None) -> None:

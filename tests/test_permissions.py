@@ -240,6 +240,56 @@ class TestInteractivePermissionHandler(unittest.TestCase):
         handler._enable_setting(request, ctx)
         self.assertFalse(ctx.permission_context.allow_docs)
 
+    def _ask(self, value: str, request: PermissionResult, ctx: ToolContext):
+        console = MagicMock()
+        handler = InteractivePermissionHandler(console=console, prompt_func=lambda _: value)
+        behavior, _ = handler.handle_permission_request("Write", request, ctx)
+        printed = " ".join(str(call.args[0]) for call in console.print.call_args_list if call.args)
+        return behavior, printed
+
+    def test_every_ask_requires_explicit_choice(self) -> None:
+        ctx = ToolContext(workspace_root=Path.cwd())
+        request = PermissionResult.ask("ordinary permission")
+        # Ordinary menu: 1=Yes, 2=No.
+        cases = {
+            "": PermissionBehavior.DENY, "   ": PermissionBehavior.DENY,
+            "y": PermissionBehavior.ALLOW, "YES": PermissionBehavior.ALLOW, "1": PermissionBehavior.ALLOW,
+            "n": PermissionBehavior.DENY, "no": PermissionBehavior.DENY, "2": PermissionBehavior.DENY,
+            "e": PermissionBehavior.DENY, "3": PermissionBehavior.DENY, "maybe": PermissionBehavior.DENY,
+        }
+        for value, expected in cases.items():
+            with self.subTest(value=value):
+                behavior, printed = self._ask(value, request, ctx)
+                self.assertEqual(behavior, expected)
+                if value.strip() == "":
+                    self.assertIn("No choice entered — denied.", printed)
+                elif value in ("e", "3", "maybe"):
+                    self.assertIn("Invalid choice — denied.", printed)
+
+    def test_enable_menu_numbers_match_displayed_options(self) -> None:
+        request = PermissionResult.ask(
+            "Writing documentation files is blocked unless allow_docs is enabled"
+        )
+        # Enable menu: 1=Enable, 2=Yes, 3=No.
+        cases = {
+            "1": (PermissionBehavior.ALLOW, True),
+            "e": (PermissionBehavior.ALLOW, True),
+            "2": (PermissionBehavior.ALLOW, False),
+            "y": (PermissionBehavior.ALLOW, False),
+            "3": (PermissionBehavior.DENY, False),
+            "n": (PermissionBehavior.DENY, False),
+            "": (PermissionBehavior.DENY, False),
+            "4": (PermissionBehavior.DENY, False),
+        }
+        for value, (expected_behavior, expected_enabled) in cases.items():
+            with self.subTest(value=value):
+                ctx = ToolContext(workspace_root=Path.cwd())
+                ctx.permission_context.allow_docs = False
+                ctx.permission_context.allow_docs_locked_off = False
+                behavior, _ = self._ask(value, request, ctx)
+                self.assertEqual(behavior, expected_behavior)
+                self.assertIs(ctx.permission_context.allow_docs, expected_enabled)
+
 
 class TestPermissionContext(unittest.TestCase):
     def test_default_allow_docs_is_false(self) -> None:
