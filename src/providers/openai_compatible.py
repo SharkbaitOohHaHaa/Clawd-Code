@@ -10,7 +10,13 @@ import json
 from abc import abstractmethod
 from typing import Any, Generator, Optional
 
-from .base import BaseProvider, ChatResponse, MessageInput, TextChunkCallback
+from .base import (
+    BaseProvider,
+    ChatResponse,
+    IncompleteResponseError,
+    MessageInput,
+    TextChunkCallback,
+)
 
 
 def _convert_to_openai_tool_schema(anthropic_tool: dict[str, Any]) -> dict[str, Any] | None:
@@ -143,6 +149,16 @@ class OpenAICompatibleProvider(BaseProvider):
 
         # Extract content
         choice = response.choices[0]
+        if choice.finish_reason == "length":
+            # The provider stopped at its output limit: never a complete answer, and a
+            # tool call from its partial arguments must never run.
+            tool_calls = getattr(choice.message, "tool_calls", None)
+            raise IncompleteResponseError(
+                "tool_input_truncated" if tool_calls else "output_limit",
+                partial_text=choice.message.content or "",
+                partial_usage=self._build_usage_dict(getattr(response, "usage", None)),
+                tool_call_dropped=bool(tool_calls),
+            )
 
         # Handle reasoning content (GLM specific, but harmless for others)
         reasoning_content: Optional[str] = None
@@ -292,6 +308,15 @@ class OpenAICompatibleProvider(BaseProvider):
                     fn_args = getattr(function, "arguments", None)
                     if fn_args:
                         entry["arguments"] += str(fn_args)
+
+        if finish_reason == "length":
+            # Same rule as chat(): checked before any tool arguments are parsed.
+            raise IncompleteResponseError(
+                "tool_input_truncated" if tool_calls_by_index else "output_limit",
+                partial_text="".join(content_parts),
+                partial_usage=self._build_usage_dict(usage_obj),
+                tool_call_dropped=bool(tool_calls_by_index),
+            )
 
         tool_uses: list[dict[str, Any]] = []
         for idx in sorted(tool_calls_by_index.keys()):

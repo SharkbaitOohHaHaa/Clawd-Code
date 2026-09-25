@@ -82,7 +82,7 @@ from src.providers import (
     validate_provider_runtime_config,
 )
 from src.providers.anthropic_provider import AnthropicProvider
-from src.providers.base import ChatMessage, ChatResponse
+from src.providers.base import ChatMessage, ChatResponse, IncompleteResponseError
 from src.providers.minimax_provider import MinimaxProvider
 from src.tool_system.context import ToolContext
 from src.tool_system.defaults import build_default_registry
@@ -1546,6 +1546,48 @@ class ClawdREPL:
             "or /usage for API/model usage plus skill and tool activity.[/dim]"
         )
 
+    def _report_incomplete_response(
+        self, error: IncompleteResponseError, *, stream_started: bool, earlier_turns_completed: bool
+    ) -> None:
+        """Keep an output-limit response as partial; never present it as a complete answer."""
+        if error.partial_text and not self.stream:
+            # Non-stream mode has not shown anything yet; stream mode already showed it live.
+            self.console.print(error.partial_text, markup=False, highlight=False, soft_wrap=True)
+        if stream_started:
+            self.console.print()
+        self.console.print("[yellow]Incomplete response: the provider stopped at its output limit.[/yellow]")
+        if error.partial_text:
+            self.console.print(
+                "[yellow]The text above is partial. It is kept in the conversation marked as "
+                "incomplete, not as a complete answer.[/yellow]"
+            )
+        if error.tool_call_dropped:
+            self.console.print("[yellow]A tool call in this response was cut off and was not run.[/yellow]")
+        self.console.print("[dim]Clawd did not issue a fallback retry.[/dim]")
+        input_tokens = int(error.partial_usage.get("input_tokens", 0) or 0)
+        output_tokens = int(error.partial_usage.get("output_tokens", 0) or 0)
+        if input_tokens or output_tokens:
+            self.console.print(
+                f"[dim]Usage for the incomplete request: at least {input_tokens:,} input and "
+                f"{output_tokens:,} output tokens were reported (not recorded).[/dim]"
+            )
+        else:
+            self.console.print(
+                "[dim]Usage for the incomplete request: the provider did not report token counts.[/dim]"
+            )
+        if earlier_turns_completed:
+            self.console.print("[dim]Earlier completed requests in this task were not recorded.[/dim]")
+
+        note = "Incomplete response: the provider stopped at its output limit."
+        if error.tool_call_dropped:
+            note += " A tool call was cut off and was not run."
+        if error.partial_text:
+            note += " The text below is partial and is not a complete answer."
+            self.session.conversation.add_assistant_message(f"[{note}]\n\n{error.partial_text}")
+        else:
+            self.session.conversation.add_assistant_message(f"[{note}]")
+        self.console.print()
+
     def chat(self, user_input: str, max_turns: int = 20):
         """Send message to LLM and display response.
 
@@ -1717,7 +1759,16 @@ class ClawdREPL:
             # reference so later permission/user prompts do not try to restart it.
             self._current_status = None
 
-            if _is_provider_authentication_error(e):
+            if isinstance(e, IncompleteResponseError):
+                # Checked first, so the auth classifier never sees partial provider output.
+                self._report_incomplete_response(
+                    e,
+                    stream_started=stream_started,
+                    earlier_turns_completed=(
+                        len(self.session.conversation.messages) > len(pre_task_messages) + 1
+                    ),
+                )
+            elif _is_provider_authentication_error(e):
                 current_messages = self.session.conversation.messages
                 clean_unanswered_turn = current_messages == pre_task_messages
                 if (

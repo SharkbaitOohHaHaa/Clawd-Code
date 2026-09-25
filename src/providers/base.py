@@ -31,6 +31,40 @@ class ChatResponse:
     tool_uses: Optional[list[dict[str, Any]]] = None
 
 
+class IncompleteResponseError(RuntimeError):
+    """The provider reported that generation stopped at its output limit.
+
+    Raised by built-in providers for Anthropic ``stop_reason == "max_tokens"`` and
+    OpenAI-compatible ``finish_reason == "length"``, streamed or not. It carries the
+    partial text so callers can keep it as partial; it never carries tool calls, so a
+    truncated tool call cannot run. Not a NotImplementedError: nothing falls back or
+    retries. The message is fixed text (no provider text, no digits) so it can never
+    look like an authentication failure.
+    """
+
+    _MESSAGES = {
+        "output_limit": "The provider stopped at its output limit; the response is incomplete.",
+        "tool_input_truncated": (
+            "The provider stopped at its output limit while writing a tool call; "
+            "the response is incomplete and the tool call was not run."
+        ),
+    }
+
+    def __init__(
+        self,
+        reason: str,
+        *,
+        partial_text: str = "",
+        partial_usage: Optional[dict[str, Any]] = None,
+        tool_call_dropped: bool = False,
+    ) -> None:
+        self.reason = reason
+        self.partial_text = partial_text
+        self.partial_usage = dict(partial_usage or {})
+        self.tool_call_dropped = tool_call_dropped
+        super().__init__(self._MESSAGES[reason])
+
+
 MessageInput: TypeAlias = ChatMessage | dict[str, Any]
 TextChunkCallback: TypeAlias = Callable[[str], None]
 

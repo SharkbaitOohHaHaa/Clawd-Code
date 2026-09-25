@@ -18,7 +18,13 @@ except ModuleNotFoundError:  # pragma: no cover
 
     anthropic = _MissingAnthropic()
 
-from .base import BaseProvider, ChatResponse, MessageInput, TextChunkCallback
+from .base import (
+    BaseProvider,
+    ChatResponse,
+    IncompleteResponseError,
+    MessageInput,
+    TextChunkCallback,
+)
 from .sdk_policy import SDK_MAX_RETRIES, require_sdk_retry_policy
 
 
@@ -73,13 +79,23 @@ class AnthropicProvider(BaseProvider):
                 })
 
         usage = getattr(response, "usage", None)
+        usage_dict = {
+            "input_tokens": getattr(usage, "input_tokens", 0),
+            "output_tokens": getattr(usage, "output_tokens", 0),
+        }
+        # The provider says it stopped at max_tokens (streamed or not): never a complete
+        # answer, and a tool call built from its partial input must never run.
+        if getattr(response, "stop_reason", None) == "max_tokens":
+            raise IncompleteResponseError(
+                "tool_input_truncated" if tool_uses else "output_limit",
+                partial_text=content_text,
+                partial_usage=usage_dict,
+                tool_call_dropped=bool(tool_uses),
+            )
         return ChatResponse(
             content=content_text,
             model=getattr(response, "model", self.model or ""),
-            usage={
-                "input_tokens": getattr(usage, "input_tokens", 0),
-                "output_tokens": getattr(usage, "output_tokens", 0),
-            },
+            usage=usage_dict,
             finish_reason=str(getattr(response, "stop_reason", "stop")),
             tool_uses=tool_uses if tool_uses else None,
         )

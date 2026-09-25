@@ -1732,6 +1732,123 @@ class TestREPL(unittest.TestCase):
                 self.assertNotIn(self._EMPTY_NOTICE, self._printed(repl))
                 self.assertEqual(repl.session.conversation.messages[0].content, "你好呀")
 
+    _LIMIT_NOTICE = "Incomplete response: the provider stopped at its output limit."
+
+    def _chat_with_guards(self, repl, prompt, *, agent_loop_side_effect=None):
+        from src.tool_system.agent_loop import AgentPreflight
+
+        with patch('src.repl.core.build_agent_preflight',
+                   return_value=AgentPreflight([], "SYSTEM", [], 1)) as preflight, \
+             patch('src.repl.core.run_agent_loop', side_effect=agent_loop_side_effect) as agent_loop, \
+             patch('src.repl.core.append_provider_usage') as ledger, \
+             patch('rich.prompt.Prompt.ask') as ask, \
+             patch('traceback.print_exc') as print_exc:
+            repl.chat(prompt)
+        ledger.assert_not_called()
+        ask.assert_not_called()
+        print_exc.assert_not_called()
+        return preflight, agent_loop
+
+    def test_output_limit_direct_reply_is_kept_as_partial_not_complete(self):
+        """Provider-declared truncation: partial text shown once and stored marked incomplete."""
+        from src.providers.base import IncompleteResponseError
+
+        usage = {"input_tokens": 11, "output_tokens": 7}
+
+        def stream_then_limit(messages, tools=None, on_text_chunk=None, **kwargs):
+            on_text_chunk("Hello wor")
+            raise IncompleteResponseError("output_limit", partial_text="Hello wor", partial_usage=usage)
+
+        cases = (
+            ("stream", True, "chat_stream_response", stream_then_limit),
+            ("non-stream", False, "chat",
+             IncompleteResponseError("output_limit", partial_text="Hello wor", partial_usage=usage)),
+        )
+        for label, stream, method, side_effect in cases:
+            with self.subTest(label):
+                provider = Mock()
+                provider.model = "glm-4.5"
+                getattr(provider, method).side_effect = side_effect
+                repl = self._direct_failure_repl(stream=stream, provider=provider)
+
+                preflight, agent_loop = self._chat_with_guards(repl, "你好呀")
+
+                getattr(provider, method).assert_called_once()
+                preflight.assert_not_called()
+                agent_loop.assert_not_called()
+                printed = self._printed(repl)
+                self.assertEqual(printed.count("Hello wor"), 1)
+                self.assertIn(self._LIMIT_NOTICE, printed)
+                self.assertIn("The text above is partial.", printed)
+                self.assertIn("Clawd did not issue a fallback retry.", printed)
+                self.assertIn("at least 11 input and 7 output tokens were reported (not recorded)", printed)
+                for absent in ("Error:", self._EMPTY_NOTICE, "A tool call", "Earlier completed"):
+                    self.assertNotIn(absent, printed)
+                self.assertEqual(
+                    [(m.role, m.content) for m in repl.session.conversation.messages],
+                    [("user", "你好呀"),
+                     ("assistant", "[Incomplete response: the provider stopped at its output limit. "
+                                   "The text below is partial and is not a complete answer.]\n\nHello wor")],
+                )
+
+    def test_output_limit_in_agent_route_stores_only_the_marker(self):
+        """Tool-only / reasoning-only truncation stores just the marker; never tool calls."""
+        from src.providers.base import IncompleteResponseError
+
+        tool_marker = ("[Incomplete response: the provider stopped at its output limit. "
+                       "A tool call was cut off and was not run.]")
+        cases = (
+            ("tool call, first turn", "tool_input_truncated", True, False, tool_marker),
+            ("tool call after an earlier turn", "tool_input_truncated", True, True, tool_marker),
+            ("reasoning only", "output_limit", False, False,
+             "[Incomplete response: the provider stopped at its output limit.]"),
+        )
+        for label, reason, dropped, earlier_turn, marker in cases:
+            with self.subTest(label):
+                provider = Mock()
+                provider.model = "glm-4.5"
+                repl = self._direct_failure_repl(stream=False, provider=provider)
+
+                def agent_turns(*args, **kwargs):
+                    if earlier_turn:
+                        kwargs["conversation"].add_assistant_message("earlier completed turn")
+                    raise IncompleteResponseError(reason, tool_call_dropped=dropped)
+
+                _preflight, agent_loop = self._chat_with_guards(
+                    repl, "Fix this file", agent_loop_side_effect=agent_turns
+                )
+
+                agent_loop.assert_called_once()
+                printed = self._printed(repl)
+                self.assertIn(self._LIMIT_NOTICE, printed)
+                self.assertIn("did not report token counts", printed)
+                self.assertNotIn("The text above is partial.", printed)
+                self.assertEqual("A tool call in this response was cut off and was not run." in printed, dropped)
+                self.assertEqual("Earlier completed requests in this task were not recorded." in printed,
+                                 earlier_turn)
+                expected = [("user", "Fix this file")]
+                if earlier_turn:
+                    expected.append(("assistant", "earlier completed turn"))
+                expected.append(("assistant", marker))
+                self.assertEqual([(m.role, m.content) for m in repl.session.conversation.messages], expected)
+
+    def test_output_limit_partial_text_is_never_auth_classified(self):
+        from src.providers.base import IncompleteResponseError
+
+        provider = Mock()
+        provider.model = "glm-4.5"
+        provider.chat.side_effect = IncompleteResponseError(
+            "output_limit", partial_text="HTTP 401 Unauthorized: invalid api key"
+        )
+        repl = self._direct_failure_repl(stream=False, provider=provider)
+
+        self._chat_with_guards(repl, "你好呀")
+
+        printed = self._printed(repl)
+        self.assertIn(self._LIMIT_NOTICE, printed)
+        self.assertNotIn("Authentication Error", printed)
+        self.assertEqual(len(repl.session.conversation.messages), 2)
+
     def test_handle_command_slash_shows_commands_and_skills(self):
         skills_dir = Path(self.temp_dir) / "skills"
         (skills_dir / "hello").mkdir(parents=True, exist_ok=True)
