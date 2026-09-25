@@ -12,6 +12,7 @@ class QwenProvider(OpenAIProvider):
 
     DEFAULT_BASE_URL = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
     DEFAULT_MODEL = "qwen3.8-max"
+    FINISH_STATUS_PROFILE = "qwen"
 
     def __init__(
         self,

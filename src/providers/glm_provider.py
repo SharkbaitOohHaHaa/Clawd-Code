@@ -18,6 +18,7 @@ class GLMProvider(OpenAICompatibleProvider):
 
     DEFAULT_BASE_URL = "https://open.bigmodel.cn/api/paas/v4"
     DEFAULT_MODEL = "glm-5-turbo"
+    FINISH_STATUS_PROFILE = "glm"
 
     def __init__(
         self, api_key: str, base_url: Optional[str] = None, model: Optional[str] = None

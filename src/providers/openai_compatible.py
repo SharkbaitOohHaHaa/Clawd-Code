@@ -14,9 +14,11 @@ from typing import Any, Generator, Optional
 from .base import (
     BaseProvider,
     ChatResponse,
+    FinishStatusError,
     IncompleteResponseError,
     MessageInput,
     TextChunkCallback,
+    classify_finish_status,
 )
 
 
@@ -82,6 +84,8 @@ class OpenAICompatibleProvider(BaseProvider):
 
     The client is created lazily on first use.
     """
+
+    FINISH_STATUS_PROFILE = "openai"  # the OpenAI Chat Completions contract
 
     def __init__(
         self,
@@ -208,6 +212,19 @@ class OpenAICompatibleProvider(BaseProvider):
                     "input": _parse_tool_arguments(getattr(tc.function, "arguments", None)),
                 })
 
+        # After the output-limit check: a finish status the provider documents as abnormal
+        # (or an unrecognized one on a tool-call response) is never returned as a success.
+        finish_status = classify_finish_status(
+            self.FINISH_STATUS_PROFILE, [choice.finish_reason], has_tool_calls=bool(tool_uses)
+        )
+        if finish_status is not None:
+            raise FinishStatusError.from_status(
+                finish_status,
+                partial_text=choice.message.content or "",
+                partial_usage=self._build_usage_dict(getattr(response, "usage", None)),
+                tool_call_dropped=bool(tool_uses),
+            )
+
         return ChatResponse(
             content=choice.message.content or "",
             model=response.model,
@@ -284,6 +301,7 @@ class OpenAICompatibleProvider(BaseProvider):
         content_parts: list[str] = []
         response_model = model
         finish_reason = "stop"
+        finish_values_seen: list[Any] = []
         reasoning_parts: list[str] = []
         usage_obj: Any = None
         tool_calls_by_index: dict[int, dict[str, str]] = {}
@@ -301,6 +319,9 @@ class OpenAICompatibleProvider(BaseProvider):
             choice = choices[0]
             if getattr(choice, "finish_reason", None):
                 finish_reason = choice.finish_reason
+            reported_finish = getattr(choice, "finish_reason", None)
+            if reported_finish is not None and reported_finish != "":
+                finish_values_seen.append(reported_finish)
 
             delta = getattr(choice, "delta", None)
             if delta is None:
@@ -360,6 +381,19 @@ class OpenAICompatibleProvider(BaseProvider):
                 "name": item["name"],
                 "input": parsed_args,
             })
+
+        # Same rule as chat(), over every finish value the stream reported: a documented
+        # abnormal value on any chunk counts even if a later chunk says "stop".
+        finish_status = classify_finish_status(
+            self.FINISH_STATUS_PROFILE, finish_values_seen, has_tool_calls=bool(tool_uses)
+        )
+        if finish_status is not None:
+            raise FinishStatusError.from_status(
+                finish_status,
+                partial_text="".join(content_parts),
+                partial_usage=self._build_usage_dict(usage_obj),
+                tool_call_dropped=bool(tool_calls_by_index),  # as the output-limit check above
+            )
 
         reasoning_content = "".join(reasoning_parts) if reasoning_parts else None
         return ChatResponse(

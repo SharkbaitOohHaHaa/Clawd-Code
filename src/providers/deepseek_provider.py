@@ -12,6 +12,7 @@ class DeepSeekProvider(OpenAIProvider):
 
     DEFAULT_BASE_URL = "https://api.deepseek.com"
     DEFAULT_MODEL = "deepseek-flash"
+    FINISH_STATUS_PROFILE = "deepseek"
 
     def __init__(
         self,

@@ -21,16 +21,20 @@ except ModuleNotFoundError:  # pragma: no cover
 from .base import (
     BaseProvider,
     ChatResponse,
+    FinishStatusError,
     IncompleteResponseError,
     InvalidToolInputError,
     MessageInput,
     TextChunkCallback,
+    classify_finish_status,
 )
 from .sdk_policy import SDK_MAX_RETRIES, require_sdk_retry_policy
 
 
 class AnthropicProvider(BaseProvider):
     """Anthropic Claude provider."""
+
+    FINISH_STATUS_PROFILE = "anthropic"
 
     def __init__(
         self, api_key: str, base_url: Optional[str] = None, model: Optional[str] = None
@@ -101,6 +105,20 @@ class AnthropicProvider(BaseProvider):
                 "name": str(getattr(block, "name", "")),
                 "input": dict(tool_input),
             })
+        # Only after both sealed checks: a finish status the provider documents as abnormal
+        # (or an unrecognized one on a tool-call response) is never returned as a success.
+        finish_status = classify_finish_status(
+            self.FINISH_STATUS_PROFILE,
+            [getattr(response, "stop_reason", None)],
+            has_tool_calls=bool(tool_uses),
+        )
+        if finish_status is not None:
+            raise FinishStatusError.from_status(
+                finish_status,
+                partial_text=content_text,
+                partial_usage=usage_dict,
+                tool_call_dropped=bool(tool_uses),
+            )
         return ChatResponse(
             content=content_text,
             model=getattr(response, "model", self.model or ""),

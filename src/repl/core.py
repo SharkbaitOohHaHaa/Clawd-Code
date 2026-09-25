@@ -82,7 +82,12 @@ from src.providers import (
     validate_provider_runtime_config,
 )
 from src.providers.anthropic_provider import AnthropicProvider
-from src.providers.base import ChatMessage, ChatResponse, IncompleteResponseError
+from src.providers.base import (
+    ChatMessage,
+    ChatResponse,
+    FinishStatusError,
+    IncompleteResponseError,
+)
 from src.providers.minimax_provider import MinimaxProvider
 from src.tool_system.context import ToolContext
 from src.tool_system.defaults import build_default_registry
@@ -1588,6 +1593,111 @@ class ClawdREPL:
             self.session.conversation.add_assistant_message(f"[{note}]")
         self.console.print()
 
+    _FINISH_STATUS_NOTES = {
+        "blocked": (
+            "Response blocked: the provider stopped this response with a safety or "
+            "content-filter status"
+        ),
+        "interrupted": "Incomplete response: the provider reported that generation was interrupted",
+        "context_window": "Incomplete response: the provider stopped at the model's context window",
+        "paused": "Incomplete response: the provider paused this turn",
+        "unrecognized": (
+            "Unverified response: the provider ended a tool-call response with a finish status "
+            "Clawd does not recognize"
+        ),
+    }
+
+    def _report_finish_status(
+        self,
+        error: FinishStatusError,
+        *,
+        stream_started: bool,
+        pre_task_messages: list[Any],
+        added_user_message: Any,
+    ) -> None:
+        """Never present a response the provider marked as not completed normally as complete.
+
+        No tool from it ran and nothing is retried. Blocked partial text is never kept; other
+        partial text is kept marked. Usage is shown but not recorded (as for output limits).
+        """
+        messages = self.session.conversation.messages
+        earlier_turns_completed = len(messages) > len(pre_task_messages) + 1
+        blocked = error.category == "blocked"
+        # Anthropic documents that the conversation must be reset after a refusal: drop the
+        # refused turn, but only while nothing else happened in this task.
+        reset_turn = (
+            error.context_reset
+            and added_user_message is not None
+            and bool(messages)
+            and messages[-1] is added_user_message
+        )
+        if error.partial_text and not blocked and not self.stream:
+            # Non-stream mode has not shown anything yet; stream mode already showed it live.
+            self.console.print(error.partial_text, markup=False, highlight=False, soft_wrap=True)
+        if stream_started:
+            self.console.print()
+        # The value is display-sanitized and printed without markup interpretation.
+        headline = f"{self._FINISH_STATUS_NOTES[error.category]} ({error.safe_finish_value})."
+        self.console.print(headline, style="yellow", markup=False, highlight=False, emoji=False)
+        if error.category == "paused":
+            self.console.print("[yellow]Clawd does not resume paused turns automatically.[/yellow]")
+        if blocked and self.stream and error.partial_text:
+            # This response's own text was delivered live before the provider's status arrived.
+            self.console.print(
+                "[yellow]The streamed text above was blocked by the provider; it is not a complete "
+                "answer and was not kept in the conversation.[/yellow]"
+            )
+        elif error.partial_text and not blocked:
+            kept_as = "unverified" if error.category == "unrecognized" else "incomplete"
+            self.console.print(
+                f"[yellow]The text above is partial. It is kept in the conversation marked as "
+                f"{kept_as}, not as a complete answer.[/yellow]"
+            )
+        if error.tool_call_dropped:
+            self.console.print("[yellow]A tool call in this response was not run.[/yellow]")
+        self.console.print("[dim]Clawd did not issue a fallback retry.[/dim]")
+        kind = {"blocked": "blocked", "unrecognized": "unverified"}.get(
+            error.category, "incomplete"
+        )
+        input_tokens = int(error.partial_usage.get("input_tokens", 0) or 0)
+        output_tokens = int(error.partial_usage.get("output_tokens", 0) or 0)
+        if input_tokens or output_tokens:
+            self.console.print(
+                f"[dim]Usage for the {kind} request: at least {input_tokens:,} input and "
+                f"{output_tokens:,} output tokens were reported (not recorded).[/dim]"
+            )
+        else:
+            self.console.print(
+                f"[dim]Usage for the {kind} request: the provider did not report token "
+                "counts.[/dim]"
+            )
+        if earlier_turns_completed:
+            self.console.print("[dim]Earlier completed requests in this task were not recorded.[/dim]")
+
+        if reset_turn:
+            messages[:] = pre_task_messages
+            self.console.print(
+                "[dim]The refused message was removed from the conversation and was not "
+                "retried. Rephrase it before sending it again.[/dim]"
+            )
+            self.console.print()
+            return
+        note = self._FINISH_STATUS_NOTES[error.category] + "."
+        if error.tool_call_dropped:
+            note += " A tool call was not run."
+        if blocked:
+            note += " No partial output was kept."
+            self.session.conversation.add_assistant_message(f"[{note}]")
+        elif error.partial_text:
+            kept_as = "was not confirmed as complete" if error.category == "unrecognized" else (
+                "is partial and is not a complete answer"
+            )
+            note += f" The text below {kept_as}."
+            self.session.conversation.add_assistant_message(f"[{note}]\n\n{error.partial_text}")
+        else:
+            self.session.conversation.add_assistant_message(f"[{note}]")
+        self.console.print()
+
     def chat(self, user_input: str, max_turns: int = 20):
         """Send message to LLM and display response.
 
@@ -1767,6 +1877,14 @@ class ClawdREPL:
                     earlier_turns_completed=(
                         len(self.session.conversation.messages) > len(pre_task_messages) + 1
                     ),
+                )
+            elif isinstance(e, FinishStatusError):
+                # Also before the auth classifier: provider finish metadata never reaches it.
+                self._report_finish_status(
+                    e,
+                    stream_started=stream_started,
+                    pre_task_messages=pre_task_messages,
+                    added_user_message=added_user_message,
                 )
             elif _is_provider_authentication_error(e):
                 current_messages = self.session.conversation.messages

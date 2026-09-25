@@ -1849,6 +1849,258 @@ class TestREPL(unittest.TestCase):
         self.assertNotIn("Authentication Error", printed)
         self.assertEqual(len(repl.session.conversation.messages), 2)
 
+    _FINISH_HEADLINES = {
+        "blocked": "Response blocked: the provider stopped this response with a safety or "
+                   "content-filter status",
+        "interrupted": "Incomplete response: the provider reported that generation was interrupted",
+        "context_window": "Incomplete response: the provider stopped at the model's context window",
+        "paused": "Incomplete response: the provider paused this turn",
+        "unrecognized": "Unverified response: the provider ended a tool-call response with a "
+                        "finish status Clawd does not recognize",
+    }
+
+    @staticmethod
+    def _finish_error(category, value, *, reset=False, dropped=False, partial="Partial answer"):
+        from src.providers.base import FinishStatusError
+
+        return FinishStatusError(
+            category, finish_value=value, partial_text=partial,
+            partial_usage={"input_tokens": 11, "output_tokens": 7},
+            tool_call_dropped=dropped, context_reset=reset,
+        )
+
+    def _direct_finish_repl(self, stream, error):
+        provider = Mock()
+        provider.model = "glm-4.5"
+        if stream:
+            def stream_then_raise(messages, tools=None, on_text_chunk=None, **kwargs):
+                on_text_chunk(error.partial_text)
+                raise error
+            provider.chat_stream_response.side_effect = stream_then_raise
+        else:
+            provider.chat.side_effect = error
+        return provider, self._direct_failure_repl(stream=stream, provider=provider)
+
+    def test_finish_status_direct_reply_is_never_kept_as_complete(self):
+        """Provider-declared abnormal finish: fixed notice, marked (or no) partial, nothing recorded."""
+        cases = (  # category, value, anthropic refusal reset
+            ("blocked", "content_filter", False),
+            ("blocked", "refusal", True),
+            ("interrupted", "network_error", False),
+            ("context_window", "model_context_window_exceeded", False),
+            ("paused", "pause_turn", False),
+            ("unrecognized", "custom_x", False),
+        )
+        for category, value, reset in cases:
+            for stream in (False, True):
+                with self.subTest(category=category, value=value, stream=stream):
+                    error = self._finish_error(category, value, reset=reset,
+                                               dropped=category == "unrecognized")
+                    provider, repl = self._direct_finish_repl(stream, error)
+
+                    preflight, agent_loop = self._chat_with_guards(repl, "你好呀")
+
+                    getattr(provider, "chat_stream_response" if stream else "chat").assert_called_once()
+                    preflight.assert_not_called()
+                    agent_loop.assert_not_called()
+                    printed = self._printed(repl)
+                    self.assertIn(f"{self._FINISH_HEADLINES[category]} ({value}).", printed)
+                    self.assertIn("Clawd did not issue a fallback retry.", printed)
+                    self.assertIn("at least 11 input and 7 output tokens were reported (not recorded)",
+                                  printed)
+                    for absent in ("Error:", self._EMPTY_NOTICE, "Authentication Error",
+                                   "Earlier completed", self._LIMIT_NOTICE):
+                        self.assertNotIn(absent, printed)
+                    self.assertEqual("Clawd does not resume paused turns automatically." in printed,
+                                     category == "paused")
+                    self.assertEqual("A tool call in this response was not run." in printed,
+                                     category == "unrecognized")
+                    history = [(m.role, m.content) for m in repl.session.conversation.messages]
+                    if category == "blocked":
+                        # Blocked text is never printed after the fact and never kept.
+                        self.assertEqual(printed.count("Partial answer"), 1 if stream else 0)
+                        self.assertEqual("The streamed text above was blocked" in printed, stream)
+                        if reset:
+                            self.assertEqual(history, [])
+                            self.assertIn("The refused message was removed from the conversation", printed)
+                        else:
+                            self.assertEqual(history, [
+                                ("user", "你好呀"),
+                                ("assistant", "[Response blocked: the provider stopped this response with "
+                                              "a safety or content-filter status. No partial output was "
+                                              "kept.]"),
+                            ])
+                            self.assertNotIn("The refused message was removed", printed)
+                    else:
+                        self.assertEqual(printed.count("Partial answer"), 1)
+                        kept_as = "unverified" if category == "unrecognized" else "incomplete"
+                        self.assertIn(f"It is kept in the conversation marked as {kept_as}", printed)
+                        self.assertEqual(history[0], ("user", "你好呀"))
+                        self.assertEqual(len(history), 2)
+                        marker, partial = history[1][1].split("\n\n")
+                        self.assertTrue(marker.startswith(f"[{self._FINISH_HEADLINES[category]}."))
+                        self.assertNotIn(value, marker)
+                        self.assertEqual(partial, "Partial answer")
+
+    def test_finish_status_rollback_is_only_for_a_clean_anthropic_refusal(self):
+        blocked_marker = ("[Response blocked: the provider stopped this response with a safety or "
+                          "content-filter status. A tool call was not run. No partial output was kept.]")
+        unverified_marker = ("[Unverified response: the provider ended a tool-call response with a "
+                             "finish status Clawd does not recognize. A tool call was not run.]")
+        cases = (  # label, category, value, reset flag, earlier turn in this task, expected tail
+            ("refusal, clean turn", "blocked", "refusal", True, False, None),
+            ("refusal after earlier activity", "blocked", "refusal", True, True, blocked_marker),
+            ("content_filter, clean turn", "blocked", "content_filter", False, False, blocked_marker),
+            ("sensitive, clean turn", "blocked", "sensitive", False, False, blocked_marker),
+            # A "refusal" value the provider does not document (e.g. MiniMax) is not Anthropic's rule.
+            ("unrecognized refusal value, clean turn", "unrecognized", "refusal", False, False,
+             unverified_marker),
+        )
+        for label, category, value, reset, earlier_turn, marker in cases:
+            with self.subTest(label):
+                provider = Mock()
+                provider.model = "glm-4.5"
+                repl = self._direct_failure_repl(stream=False, provider=provider)
+                error = self._finish_error(category, value, reset=reset, dropped=True, partial="")
+
+                def agent_turns(*args, **kwargs):
+                    if earlier_turn:
+                        kwargs["conversation"].add_assistant_message("earlier completed turn")
+                    raise error
+
+                _preflight, agent_loop = self._chat_with_guards(
+                    repl, "Fix this file", agent_loop_side_effect=agent_turns
+                )
+
+                agent_loop.assert_called_once()
+                printed = self._printed(repl)
+                history = [(m.role, m.content) for m in repl.session.conversation.messages]
+                if marker is None:
+                    self.assertEqual(history, [])
+                    self.assertIn("The refused message was removed from the conversation", printed)
+                else:
+                    expected = [("user", "Fix this file")]
+                    if earlier_turn:
+                        expected.append(("assistant", "earlier completed turn"))
+                    expected.append(("assistant", marker))
+                    self.assertEqual(history, expected)
+                    self.assertNotIn("The refused message was removed", printed)
+                self.assertEqual("Earlier completed requests in this task were not recorded." in printed,
+                                 earlier_turn)
+                self.assertIn("A tool call in this response was not run.", printed)
+                self.assertIn("at least 11 input and 7 output tokens were reported (not recorded)", printed)
+
+    def test_finish_status_provider_text_is_never_markup_or_auth_classified(self):
+        """A real console: provider-controlled text can neither inject markup nor crash chat()."""
+        import io
+        from rich.console import Console
+
+        cases = (
+            ("interrupted", "[/] [red]401 Unauthorized\x1b[0m", "(unprintable value)"),
+            ("unrecognized", 401, "(unprintable value)"),
+            ("blocked", "content_filter", "(content_filter)"),
+            ("unrecognized", "x:smile:", "(x:smile:)"),  # no emoji substitution either
+        )
+        for category, value, shown in cases:
+            for stream in (False, True):
+                with self.subTest(category=category, value=value, stream=stream):
+                    error = self._finish_error(category, value, dropped=True,
+                                               partial="HTTP 401 Unauthorized: invalid api key [/] [bold]x")
+                    _provider, repl = self._direct_finish_repl(stream, error)
+                    out = io.StringIO()
+                    repl.console = Console(file=out, width=200, force_terminal=False, color_system=None)
+
+                    self._chat_with_guards(repl, "你好呀")
+
+                    text = out.getvalue()
+                    self.assertIn(shown, text)
+                    self.assertNotIn("Authentication Error", text)
+                    self.assertNotIn("\x1b", text)
+                    if category != "blocked":
+                        self.assertIn("invalid api key [/] [bold]x", text)  # printed literally
+
+    def test_finish_status_agent_route_every_category(self):
+        """Agent route: fixed notice and marker per category; never recorded, never retried."""
+        cases = (  # category, value, marker prefix
+            ("blocked", "content_filter", "[Response blocked: the provider stopped this response"),
+            ("interrupted", "aborted", "[Incomplete response: the provider reported that generation"),
+            ("context_window", "model_context_window_exceeded",
+             "[Incomplete response: the provider stopped at the model's context window."),
+            ("paused", "pause_turn", "[Incomplete response: the provider paused this turn."),
+            ("unrecognized", "custom_x", "[Unverified response: the provider ended a tool-call response"),
+        )
+        for category, value, marker in cases:
+            for stream in (False, True):
+                with self.subTest(category=category, stream=stream):
+                    provider = Mock()
+                    provider.model = "glm-4.5"
+                    repl = self._direct_failure_repl(stream=stream, provider=provider)
+                    error = self._finish_error(category, value, dropped=True)
+
+                    def agent_turn(*args, **kwargs):
+                        if kwargs.get("on_text_chunk") is not None:
+                            kwargs["on_text_chunk"](error.partial_text)  # streamed before the status
+                        raise error
+
+                    self._chat_with_guards(repl, "Fix this file", agent_loop_side_effect=agent_turn)
+
+                    printed = self._printed(repl)
+                    self.assertIn(f"{self._FINISH_HEADLINES[category]} ({value}).", printed)
+                    self.assertEqual("Clawd does not resume paused turns automatically." in printed,
+                                     category == "paused")
+                    self.assertIn("A tool call in this response was not run.", printed)
+                    self.assertEqual(printed.count("Partial answer"),
+                                     1 if stream or category != "blocked" else 0)
+                    history = [(m.role, m.content) for m in repl.session.conversation.messages]
+                    self.assertEqual(history[0], ("user", "Fix this file"))
+                    self.assertEqual(len(history), 2)
+                    self.assertTrue(history[1][1].startswith(marker))
+                    self.assertEqual("Partial answer" in history[1][1], category != "blocked")
+
+    def test_finish_status_stream_notice_is_only_about_this_responses_text(self):
+        """A blocked turn that streamed nothing itself must not disown earlier (kept) streamed text."""
+        for blocked_text in ("", "Blocked text"):
+            with self.subTest(blocked_text=blocked_text):
+                provider = Mock()
+                provider.model = "glm-4.5"
+                repl = self._direct_failure_repl(stream=True, provider=provider)
+                error = self._finish_error("blocked", "content_filter", partial=blocked_text)
+
+                def agent_turns(*args, **kwargs):
+                    kwargs["on_text_chunk"]("Earlier streamed text")
+                    kwargs["conversation"].add_assistant_message("Earlier streamed text")
+                    if blocked_text:
+                        kwargs["on_text_chunk"](blocked_text)
+                    raise error
+
+                self._chat_with_guards(repl, "Fix this file", agent_loop_side_effect=agent_turns)
+
+                printed = self._printed(repl)
+                self.assertEqual("The streamed text above was blocked" in printed, bool(blocked_text))
+                self.assertIn("Earlier completed requests in this task were not recorded.", printed)
+                history = [(m.role, m.content) for m in repl.session.conversation.messages]
+                self.assertEqual(history[:2], [("user", "Fix this file"),
+                                               ("assistant", "Earlier streamed text")])
+                self.assertEqual(len(history), 3)
+                self.assertNotIn("Blocked text", history[2][1])
+
+    def test_finish_status_is_handled_before_the_auth_classifier(self):
+        """Even when its exception context looks like an auth failure, it is never auth-handled."""
+        error = self._finish_error("interrupted", "network_error")
+        try:
+            raise RuntimeError("HTTP 401 Unauthorized")
+        except RuntimeError as earlier:
+            error.__context__ = earlier
+        self.assertTrue(_is_provider_authentication_error(error))  # the classifier alone would
+        _provider, repl = self._direct_finish_repl(False, error)
+
+        self._chat_with_guards(repl, "你好呀")  # asserts Prompt.ask was never called
+
+        printed = self._printed(repl)
+        self.assertIn(f"{self._FINISH_HEADLINES['interrupted']} (network_error).", printed)
+        self.assertNotIn("Authentication Error", printed)
+        self.assertEqual(len(repl.session.conversation.messages), 2)
+
     def test_handle_command_slash_shows_commands_and_skills(self):
         skills_dir = Path(self.temp_dir) / "skills"
         (skills_dir / "hello").mkdir(parents=True, exist_ok=True)
