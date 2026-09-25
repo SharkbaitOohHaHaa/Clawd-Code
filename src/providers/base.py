@@ -65,6 +65,24 @@ class IncompleteResponseError(RuntimeError):
         super().__init__(self._MESSAGES[reason])
 
 
+class InvalidToolInputError(RuntimeError):
+    """A completed Anthropic-family response carried a tool call whose input is not a JSON object.
+
+    Raised instead of coercing it (e.g. a list of pairs into an object), so no tool runs on
+    input the model did not provide. Carries no tool input and has a fixed message (no
+    provider text, no digits); it is not a NotImplementedError, ValueError, TypeError or SDK
+    error, so nothing falls back or retries.
+    """
+
+    _MESSAGE = (
+        "The provider returned a tool call whose input was not a JSON object; "
+        "the response was rejected and no tool was run."
+    )
+
+    def __init__(self) -> None:
+        super().__init__(self._MESSAGE)
+
+
 MessageInput: TypeAlias = ChatMessage | dict[str, Any]
 TextChunkCallback: TypeAlias = Callable[[str], None]
 

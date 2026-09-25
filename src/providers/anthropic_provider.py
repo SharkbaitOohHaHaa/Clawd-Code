@@ -22,6 +22,7 @@ from .base import (
     BaseProvider,
     ChatResponse,
     IncompleteResponseError,
+    InvalidToolInputError,
     MessageInput,
     TextChunkCallback,
 )
@@ -63,7 +64,7 @@ class AnthropicProvider(BaseProvider):
     def _build_chat_response(self, response: Any) -> ChatResponse:
         """Convert Anthropic SDK response into the shared ChatResponse shape."""
         content_text = ""
-        tool_uses: list[dict[str, Any]] = []
+        tool_blocks: list[Any] = []
 
         for block in response.content:
             block_type = getattr(block, "type", "text")
@@ -72,11 +73,7 @@ class AnthropicProvider(BaseProvider):
                 if text_val is not None:
                     content_text += str(text_val)
             elif block_type == "tool_use":
-                tool_uses.append({
-                    "id": str(getattr(block, "id", "")),
-                    "name": str(getattr(block, "name", "")),
-                    "input": dict(getattr(block, "input", {})),
-                })
+                tool_blocks.append(block)
 
         usage = getattr(response, "usage", None)
         usage_dict = {
@@ -87,11 +84,23 @@ class AnthropicProvider(BaseProvider):
         # answer, and a tool call built from its partial input must never run.
         if getattr(response, "stop_reason", None) == "max_tokens":
             raise IncompleteResponseError(
-                "tool_input_truncated" if tool_uses else "output_limit",
+                "tool_input_truncated" if tool_blocks else "output_limit",
                 partial_text=content_text,
                 partial_usage=usage_dict,
-                tool_call_dropped=bool(tool_uses),
+                tool_call_dropped=bool(tool_blocks),
             )
+        # Only after the sealed output-limit check: a tool input that is not a real object
+        # is rejected, never coerced (e.g. a list of pairs into an object) and run.
+        tool_uses: list[dict[str, Any]] = []
+        for block in tool_blocks:
+            tool_input = getattr(block, "input", None)
+            if not isinstance(tool_input, dict):
+                raise InvalidToolInputError()
+            tool_uses.append({
+                "id": str(getattr(block, "id", "")),
+                "name": str(getattr(block, "name", "")),
+                "input": dict(tool_input),
+            })
         return ChatResponse(
             content=content_text,
             model=getattr(response, "model", self.model or ""),

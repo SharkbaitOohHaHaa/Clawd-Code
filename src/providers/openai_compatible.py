@@ -7,6 +7,7 @@ OpenAI-style /chat/completions API (OpenAI, GLM, Minimax, etc.).
 from __future__ import annotations
 
 import json
+import math
 from abc import abstractmethod
 from typing import Any, Generator, Optional
 
@@ -17,6 +18,34 @@ from .base import (
     MessageInput,
     TextChunkCallback,
 )
+
+
+def _reject_non_finite(_value: str) -> Any:
+    raise ValueError("non-finite JSON number")
+
+
+def _finite_float(value: str) -> float:
+    number = float(value)
+    if not math.isfinite(number):  # e.g. 1e999 overflows to inf
+        raise ValueError("non-finite JSON number")
+    return number
+
+
+def _parse_tool_arguments(raw: Any) -> Any:
+    """Parse serialized tool-call arguments without inventing input.
+
+    Valid JSON is returned exactly as parsed ({} stays {}, objects are unchanged, non-object
+    values keep their type, duplicate keys keep last-wins). Anything else (malformed JSON,
+    empty or whitespace-only text, NaN/Infinity, non-string wire values) is returned as the
+    raw text, never as {}: every tool schema expects an object, so validation rejects it
+    before permission checks or run().
+    """
+    if not isinstance(raw, str):
+        return "" if raw is None else str(raw)
+    try:
+        return json.loads(raw, parse_constant=_reject_non_finite, parse_float=_finite_float)
+    except (ValueError, RecursionError):
+        return raw
 
 
 def _convert_to_openai_tool_schema(anthropic_tool: dict[str, Any]) -> dict[str, Any] | None:
@@ -173,14 +202,10 @@ class OpenAICompatibleProvider(BaseProvider):
         if hasattr(choice.message, "tool_calls") and choice.message.tool_calls:
             tool_uses = []
             for tc in choice.message.tool_calls:
-                try:
-                    args = json.loads(tc.function.arguments) if tc.function.arguments else {}
-                except Exception:
-                    args = {}
                 tool_uses.append({
                     "id": tc.id,
                     "name": tc.function.name,
-                    "input": args,
+                    "input": _parse_tool_arguments(getattr(tc.function, "arguments", None)),
                 })
 
         return ChatResponse(
@@ -262,6 +287,7 @@ class OpenAICompatibleProvider(BaseProvider):
         reasoning_parts: list[str] = []
         usage_obj: Any = None
         tool_calls_by_index: dict[int, dict[str, str]] = {}
+        non_string_argument_indexes: set[int] = set()
 
         for chunk in stream:
             response_model = getattr(chunk, "model", response_model)
@@ -306,6 +332,8 @@ class OpenAICompatibleProvider(BaseProvider):
                     if fn_name:
                         entry["name"] += str(fn_name)
                     fn_args = getattr(function, "arguments", None)
+                    if fn_args is not None and not isinstance(fn_args, str):
+                        non_string_argument_indexes.add(idx)
                     if fn_args:
                         entry["arguments"] += str(fn_args)
 
@@ -323,10 +351,10 @@ class OpenAICompatibleProvider(BaseProvider):
             item = tool_calls_by_index[idx]
             if not item["name"]:
                 continue
-            try:
-                parsed_args = json.loads(item["arguments"]) if item["arguments"] else {}
-            except Exception:
-                parsed_args = {}
+            if idx in non_string_argument_indexes:
+                parsed_args: Any = item["arguments"]  # non-string wire value: never parsed
+            else:
+                parsed_args = _parse_tool_arguments(item["arguments"])
             tool_uses.append({
                 "id": item["id"] or f"tool_call_{idx}",
                 "name": item["name"],
