@@ -82,7 +82,7 @@ from src.providers import (
     validate_provider_runtime_config,
 )
 from src.providers.anthropic_provider import AnthropicProvider
-from src.providers.base import ChatMessage
+from src.providers.base import ChatMessage, ChatResponse
 from src.providers.minimax_provider import MinimaxProvider
 from src.tool_system.context import ToolContext
 from src.tool_system.defaults import build_default_registry
@@ -146,6 +146,17 @@ _OSV_INTENT_PATTERN = re.compile(
     r"\b(?:cve-\d{4}-\d{4,}|ghsa(?:-[0-9a-z]{4}){3}|osv-\d{4}-[\w-]+|pysec-\d{4}-\d+)\b"
     r"|\bcves?\b|vulnerab|security advisor|\bosv\b|\bpkg:[a-z]"
 )
+
+
+class _EmptyDirectReply:
+    """The direct request WAS sent and came back with no text.
+
+    Ends the turn. It must never hand over to the agent route, which would send
+    a second provider request.
+    """
+
+    def __init__(self, usage: Any = None) -> None:
+        self.usage = usage if isinstance(usage, dict) else {}
 
 
 def _is_provider_authentication_error(error: BaseException) -> bool:
@@ -1288,9 +1299,12 @@ class ClawdREPL:
         return not any(marker in text for marker in code_task_markers)
 
     def _direct_response(self, on_text_chunk=None):
-        # A provider failure here surfaces to the user; it never falls through to
-        # the agent route, which would send a second request. Only a local payload
-        # failure (nothing sent yet) still hands over to the agent route.
+        # Return None ONLY when the local payload cannot be built (nothing sent);
+        # the agent route may then take over. Once a provider call has been made,
+        # a failure raises and an empty reply returns _EmptyDirectReply. Both end
+        # the turn; neither may fall through to the agent route (a second request).
+        # NotImplementedError from chat_stream_response before any chunk is treated
+        # as unsupported (nothing sent) and uses the legacy chat_stream in this route.
         try:
             api_messages, call_kwargs = self._build_direct_stream_payload()
         except Exception:
@@ -1300,7 +1314,7 @@ class ClawdREPL:
             response = self.provider.chat(api_messages, tools=None, **call_kwargs)
             full_response = getattr(response, "content", "") or ""
             if not full_response:
-                return None
+                return _EmptyDirectReply(getattr(response, "usage", None))
             self.session.conversation.add_assistant_message(full_response)
             return response
 
@@ -1330,14 +1344,16 @@ class ClawdREPL:
             for chunk in self.provider.chat_stream(api_messages, tools=None, **call_kwargs):
                 capture_chunk(chunk)
             if not streamed_chunks:
-                return None
+                return _EmptyDirectReply()
             full_response = "".join(streamed_chunks)
             self.session.conversation.add_assistant_message(full_response)
             return {"content": full_response, "usage": {}}
 
+        if not isinstance(response, ChatResponse):
+            raise TypeError("Structured streaming must return ChatResponse")
         full_response = getattr(response, "content", "") or "".join(streamed_chunks)
         if not full_response:
-            return None
+            return _EmptyDirectReply(getattr(response, "usage", None))
         self.session.conversation.add_assistant_message(full_response)
         return response
 
@@ -1614,6 +1630,25 @@ class ClawdREPL:
                         on_text_chunk=on_text_chunk if self.stream else None
                     )
                 self._current_status = None
+                if isinstance(direct_response, _EmptyDirectReply):
+                    # The request was sent and came back empty: end the turn here
+                    # (no agent-route request) and drop the unanswered user message
+                    # only if nothing else has touched the conversation since.
+                    current_messages = self.session.conversation.messages
+                    if (
+                        added_user_message is not None
+                        and current_messages
+                        and current_messages[-1] is added_user_message
+                        and not stream_started
+                    ):
+                        current_messages[:] = pre_task_messages
+                    self.console.print(
+                        "[dim]The provider returned an empty response. "
+                        "Clawd did not issue a fallback retry.[/dim]"
+                    )
+                    self._record_and_print_task_usage(direct_response.usage, skills_used)
+                    self.console.print()
+                    return
                 if direct_response is not None:
                     direct_usage = (
                         direct_response.get("usage", {})

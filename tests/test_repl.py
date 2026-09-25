@@ -1195,12 +1195,14 @@ class TestREPL(unittest.TestCase):
         )
 
         with patch('src.repl.core.build_agent_preflight') as preflight, \
+             patch('src.repl.core.append_provider_usage'), \
              patch('builtins.input') as prompt:
             repl.chat("hello")
 
         provider.chat.assert_called_once()
         preflight.assert_not_called()
         prompt.assert_not_called()
+        self.assertNotIn(self._EMPTY_NOTICE, self._printed(repl))
 
     def test_below_threshold_agent_request_proceeds_without_confirmation(self):
         from src.tool_system.agent_loop import AgentPreflight
@@ -1439,6 +1441,7 @@ class TestREPL(unittest.TestCase):
                         args and isinstance(args[0], Markdown)
                         for args, _kwargs in repl.console.print.call_args_list
                     ))
+                    self.assertNotIn(self._EMPTY_NOTICE, self._printed(repl))
                     self.assertEqual(len(mock_session.conversation.messages), 2)
                     self.assertEqual(mock_session.conversation.messages[1].role, "assistant")
                     self.assertEqual(mock_session.conversation.messages[1].content, "你好")
@@ -1491,6 +1494,7 @@ class TestREPL(unittest.TestCase):
         printed = " ".join(str(call.args[0]) for call in repl.console.print.call_args_list if call.args)
         self.assertIn("Error:", printed)
         self.assertIn("The request failed. Clawd did not issue a fallback retry.", printed)
+        self.assertNotIn(self._EMPTY_NOTICE, printed)
 
     def test_chat_stream_legacy_failure_surfaces_without_agent_loop_request(self):
         """A real legacy-stream failure is shown; it never turns into a second (agent) request."""
@@ -1566,6 +1570,167 @@ class TestREPL(unittest.TestCase):
                 provider.chat_stream.assert_not_called()
                 provider.chat.assert_not_called()
                 self._assert_direct_failure_surfaced(repl, mock_agent_loop)
+
+    _EMPTY_NOTICE = "The provider returned an empty response. Clawd did not issue a fallback retry."
+
+    @staticmethod
+    def _empty(**overrides):
+        fields = dict(content="", model="glm-4.5", usage={}, finish_reason="stop", tool_uses=None)
+        fields.update(overrides)
+        return ChatResponse(**fields)
+
+    @staticmethod
+    def _printed(repl) -> str:
+        return " ".join(str(call.args[0]) for call in repl.console.print.call_args_list if call.args)
+
+    def _chat_expect_terminal_empty(self, repl):
+        """One user turn whose direct reply is empty: it must end without an agent request."""
+        before = [(m.role, m.content) for m in repl.session.conversation.messages]
+        with patch('src.repl.core.build_agent_preflight') as preflight, \
+             patch('src.repl.core.run_agent_loop') as agent_loop, \
+             patch('src.repl.core.append_provider_usage') as ledger, \
+             patch('builtins.input') as prompt, \
+             patch('traceback.print_exc') as print_exc:
+            repl.chat("你好呀")
+        for untouched in (preflight, agent_loop, prompt, print_exc):
+            untouched.assert_not_called()
+        printed = self._printed(repl)
+        self.assertEqual(printed.count(self._EMPTY_NOTICE), 1)
+        self.assertNotIn("Error:", printed)
+        self.assertNotIn("The request failed.", printed)
+        self.assertEqual(printed.count("Usage this task"), 1)
+        self.assertIsNone(repl._current_status)
+        # The unanswered user message is rolled back; nothing is stored for the empty reply.
+        self.assertEqual([(m.role, m.content) for m in repl.session.conversation.messages], before)
+        return ledger, printed
+
+    def test_direct_empty_reply_ends_turn_without_agent_route(self):
+        """A sent-but-empty direct reply ends the turn: no second (agent-route) request."""
+        usage_9 = {"input_tokens": 9, "output_tokens": 0}
+        reasoning = dict(reasoning_content="E7-REASONING-SENTINEL", finish_reason="length")
+
+        def empty_after_blank_chunk(messages, tools=None, on_text_chunk=None, **kwargs):
+            on_text_chunk("")
+            return self._empty()
+
+        cases = [
+            ("non-stream empty", False, {"chat": self._empty(usage=usage_9)}, "chat", True),
+            ("non-stream reasoning only", False,
+             {"chat": self._empty(usage={"input_tokens": 9, "output_tokens": 40}, **reasoning)}, "chat", True),
+            ("non-stream unexpected tool_uses", False,
+             {"chat": self._empty(tool_uses=[{"id": "t", "name": "Read", "input": {}}])}, "chat", False),
+            ("stream empty", True, {"chat_stream_response": self._empty()}, "chat_stream_response", False),
+            ("stream blank chunk then empty", True,
+             {"chat_stream_response": empty_after_blank_chunk}, "chat_stream_response", False),
+            ("stream reasoning only", True,
+             {"chat_stream_response": self._empty(usage=usage_9, **reasoning)}, "chat_stream_response", True),
+            ("legacy stream yields nothing", True,
+             {"chat_stream_response": NotImplementedError, "chat_stream": iter([])}, "chat_stream", False),
+        ]
+        for label, stream, behaviour, sent_by, billed in cases:
+            with self.subTest(label):
+                provider = Mock()
+                provider.model = "glm-4.5"
+                for method, value in behaviour.items():
+                    if callable(value):  # an exception class or a fake method body
+                        getattr(provider, method).side_effect = value
+                    else:
+                        getattr(provider, method).return_value = value
+                repl = self._direct_failure_repl(stream=stream, provider=provider)
+
+                ledger, printed = self._chat_expect_terminal_empty(repl)
+
+                getattr(provider, sent_by).assert_called_once()
+                for other in {"chat", "chat_stream", "chat_stream_response"} - {sent_by} - set(behaviour):
+                    getattr(provider, other).assert_not_called()
+                if billed:
+                    ledger.assert_called_once()
+                    self.assertEqual(ledger.call_args.args[0]["input_tokens"], 9)
+                else:
+                    ledger.assert_not_called()
+                    self.assertIn("did not return token counts", printed)
+                self.assertNotIn("E7-REASONING-SENTINEL", printed)
+
+    def test_direct_empty_reply_keeps_conversation_touched_by_something_else(self):
+        """The rollback is guarded: it never overwrites a conversation that changed unexpectedly."""
+        provider = Mock()
+        provider.model = "glm-4.5"
+        repl = self._direct_failure_repl(stream=False, provider=provider)
+
+        def chat_that_touches_conversation(*args, **kwargs):
+            repl.session.conversation.add_assistant_message("unexpected")
+            return self._empty()
+
+        provider.chat.side_effect = chat_that_touches_conversation
+        with patch('src.repl.core.run_agent_loop') as agent_loop, \
+             patch('src.repl.core.append_provider_usage'):
+            repl.chat("你好呀")
+
+        agent_loop.assert_not_called()
+        provider.chat.assert_called_once()
+        self.assertEqual(
+            [(m.role, m.content) for m in repl.session.conversation.messages],
+            [("user", "你好呀"), ("assistant", "unexpected")],
+        )
+        self.assertIn(self._EMPTY_NOTICE, self._printed(repl))
+
+    def test_direct_structured_stream_wrong_type_surfaces_as_error(self):
+        """A structured stream that does not return ChatResponse is a provider bug, not 'empty'."""
+        for label, returned in (("None", None), ("dict", {"content": "text"})):
+            with self.subTest(label):
+                provider = Mock()
+                provider.model = "glm-4.5"
+                provider.chat_stream_response.return_value = returned
+                repl = self._direct_failure_repl(stream=True, provider=provider)
+                with patch('src.repl.core.run_agent_loop') as agent_loop:
+                    repl.chat("你好呀")
+                provider.chat_stream_response.assert_called_once()
+                provider.chat.assert_not_called()
+                provider.chat_stream.assert_not_called()
+                self._assert_direct_failure_surfaced(repl, agent_loop)
+                self.assertIn("Structured streaming must return ChatResponse", self._printed(repl))
+
+    def test_direct_empty_reply_is_one_provider_call_end_to_end(self):
+        """With the real agent loop wired in, an empty direct reply still costs exactly one call."""
+        from src.tool_system.agent_loop import AgentPreflight
+
+        provider = Mock()
+        provider.model = "glm-4.5"
+        provider.chat.side_effect = [
+            self._empty(usage={"input_tokens": 9, "output_tokens": 0}),
+            ChatResponse(content="agent", model="glm-4.5", usage={}, finish_reason="stop", tool_uses=None),
+        ]
+        repl = self._direct_failure_repl(stream=False, provider=provider)
+        with patch('src.repl.core.build_agent_preflight',
+                   return_value=AgentPreflight([], "SYSTEM", [], 1)), \
+             patch('src.repl.core.append_provider_usage'):
+            repl.chat("你好呀")
+
+        self.assertEqual(provider.chat.call_count, 1)
+        self.assertIn(self._EMPTY_NOTICE, self._printed(repl))
+
+    def test_direct_local_payload_failure_still_hands_over_to_agent_route(self):
+        """Nothing was sent: the one legitimate handover to the agent route is unchanged."""
+        from src.tool_system.agent_loop import AgentPreflight
+
+        for stream in (False, True):
+            with self.subTest(stream=stream):
+                provider = Mock()
+                provider.model = "glm-4.5"
+                repl = self._direct_failure_repl(stream=stream, provider=provider)
+                result = Mock(response_text="done", usage=None, num_turns=1)
+                with patch.object(repl, "_build_direct_stream_payload", side_effect=ValueError("local")), \
+                     patch('src.repl.core.build_agent_preflight',
+                           return_value=AgentPreflight([], "SYSTEM", [], 1)) as preflight, \
+                     patch('src.repl.core.run_agent_loop', return_value=result) as agent_loop:
+                    repl.chat("你好呀")
+
+                for method in ("chat", "chat_stream", "chat_stream_response"):
+                    getattr(provider, method).assert_not_called()
+                preflight.assert_called_once()
+                agent_loop.assert_called_once()
+                self.assertNotIn(self._EMPTY_NOTICE, self._printed(repl))
+                self.assertEqual(repl.session.conversation.messages[0].content, "你好呀")
 
     def test_handle_command_slash_shows_commands_and_skills(self):
         skills_dir = Path(self.temp_dir) / "skills"
