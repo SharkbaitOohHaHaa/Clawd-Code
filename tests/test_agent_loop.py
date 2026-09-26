@@ -400,7 +400,7 @@ class TestAgentLoop(unittest.TestCase):
         conversation.add_user_message("Say hello")
 
         mock_provider = MagicMock()
-        mock_provider.chat_stream_response.side_effect = NotImplementedError()
+        mock_provider.SUPPORTS_STRUCTURED_STREAMING = False  # chat() is chosen before any call
         mock_provider.chat.return_value = ChatResponse(
             content="Hello from Clawd!",
             model="test-model",
@@ -423,6 +423,7 @@ class TestAgentLoop(unittest.TestCase):
         self.assertEqual("".join(chunks), "Hello from Clawd!")
         self.assertEqual(result.response_text, "Hello from Clawd!")
         self.assertEqual(mock_provider.chat.call_count, 1)
+        mock_provider.chat_stream_response.assert_not_called()
         self.assertEqual(len(conversation.messages), 2)
         self.assertEqual(conversation.messages[-1].role, "assistant")
         self.assertEqual(conversation.messages[-1].content, "Hello from Clawd!")
@@ -433,7 +434,7 @@ class TestAgentLoop(unittest.TestCase):
         conversation.add_user_message("Create a file hello.py with content print('hello world')")
 
         mock_provider = MagicMock()
-        mock_provider.chat_stream_response.side_effect = NotImplementedError()
+        mock_provider.SUPPORTS_STRUCTURED_STREAMING = False  # chat() is chosen before any call
         hello_path = self.workspace / "hello.py"
         mock_response1 = ChatResponse(
             content="I will create the file.",
@@ -762,7 +763,7 @@ class TestAgentLoop(unittest.TestCase):
         conversation.add_user_message("Say hello")
 
         provider = MagicMock()
-        provider.chat_stream_response.side_effect = NotImplementedError()
+        provider.SUPPORTS_STRUCTURED_STREAMING = False  # declared: chat() without any stream call
         provider.chat.return_value = ChatResponse(
             content="Hello from fallback!",
             model="test-model",
@@ -785,6 +786,7 @@ class TestAgentLoop(unittest.TestCase):
         self.assertEqual("".join(chunks), "Hello from fallback!")
         self.assertEqual(result.response_text, "Hello from fallback!")
         provider.chat.assert_called_once()
+        provider.chat_stream_response.assert_not_called()
 
     def _run_failing_stream(self, stream_side_effect, on_text_chunk=None):
         conversation = Conversation()

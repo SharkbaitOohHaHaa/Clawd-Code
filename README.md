@@ -349,6 +349,30 @@ WORKFLOWS = [{
 
 Each workflow is registered as a plugin `PromptCommand` with `kind="workflow"`. `allowed_tools` is mandatory and non-empty; unknown tools, reserved names, and command/workflow collisions fail registration. Workflow execution uses the active Clawd session/model plus the existing tool permission system. It does not enable background workers, webhooks, or generic executable hooks.
 
+### Trusted Plugin Providers
+
+An exact-hash operator-approved plugin that declares `providers` in `plugin.json` may export `PROVIDERS`, a list of dicts (`name`, `label`, `provider_class`, `default_base_url`, `default_model`, `available_models`, `requires_api_key`, `local_only`). `provider_class` must be a concrete `src.providers.base.BaseProvider` subclass whose constructor accepts `api_key`, `base_url` and `model`.
+
+- **Required methods:** `chat`, `chat_stream`, `get_available_models`.
+- **Optional:** `chat_stream_response` (structured streaming: live text plus a final `ChatResponse` with tool calls).
+- **`SUPPORTS_STRUCTURED_STREAMING`:** a plain `bool` on the class, or set on the instance in `__init__` (for example per model). `True`/`False` declare support; `None` (the default) means Clawd detects it: a class that overrides `chat_stream_response` supports it, one that keeps the `BaseProvider` default does not. Clawd reads it statically and never runs a property for it.
+- With `False` (or no override), Clawd chooses `chat()` / `chat_stream()` **before sending anything** and never calls `chat_stream_response`.
+- Do not raise `NotImplementedError` from a `chat_stream_response` override to ask for a fallback. Once Clawd has chosen a provider method, any exception from it (including `NotImplementedError`) ends that provider attempt; Clawd shows it and does not try another provider method, because it cannot know whether a request was already sent.
+- `chat_async` is not part of the `BaseProvider` contract. If a plugin defines it, `/compact` calls it first: a `NotImplementedError` from it ends the compaction, while any other exception is currently retried once through `chat()` (a known limitation). Do not define `chat_async` unless it works.
+- Clawd's SDK retry/redirect policy and its output-limit, finish-status and malformed tool-argument checks run inside the built-in providers only; a direct `BaseProvider` plugin must handle those itself. Tool-input schema validation and permission checks apply to every provider.
+- Editing a trusted plugin changes its hash: re-pin the new exact hash in `~/.clawd/python_plugins.json`, or the plugin stays inactive.
+
+```python
+from src.providers.base import BaseProvider
+
+class LocalProvider(BaseProvider):
+    SUPPORTS_STRUCTURED_STREAMING = False  # this backend has no structured stream
+
+    def chat(self, messages, tools=None, **kwargs): ...
+    def chat_stream(self, messages, tools=None, **kwargs): ...
+    def get_available_models(self): ...
+```
+
 
 
 ***

@@ -144,6 +144,10 @@ async def compact_conversation(
         summary_text = response.content.strip()
         if isinstance(getattr(response, "usage", None), dict):
             response_usage = dict(response.usage)
+    except NotImplementedError:
+        # A defined chat_async may already have sent: surface it, never follow it with
+        # provider.chat(). (A provider without chat_async raises AttributeError instead.)
+        raise
     except Exception as e:
         # Try sync fallback
         try:

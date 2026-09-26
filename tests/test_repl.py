@@ -1424,8 +1424,8 @@ class TestREPL(unittest.TestCase):
                 with patch('src.repl.core.get_provider_class') as mock_provider_class:
                     mock_provider = Mock()
                     mock_provider.model = "glm-4.5"
-                    # Exercise the legacy chunk-stream fallback when structured streaming is unavailable.
-                    mock_provider.chat_stream_response.side_effect = NotImplementedError
+                    # Structured streaming declared unsupported: the legacy chunk stream is chosen.
+                    mock_provider.SUPPORTS_STRUCTURED_STREAMING = False
                     mock_provider.chat_stream.return_value = iter(["你", "好"])
                     mock_provider_class.return_value = Mock(return_value=mock_provider)
 
@@ -1436,6 +1436,7 @@ class TestREPL(unittest.TestCase):
                         repl.chat("你是谁")
 
                     mock_provider.chat_stream.assert_called_once()
+                    mock_provider.chat_stream_response.assert_not_called()
                     mock_agent_loop.assert_not_called()
                     self.assertFalse(any(
                         args and isinstance(args[0], Markdown)
@@ -1500,8 +1501,8 @@ class TestREPL(unittest.TestCase):
         """A real legacy-stream failure is shown; it never turns into a second (agent) request."""
         mock_provider = Mock()
         mock_provider.model = "glm-4.5"
-        # Structured streaming is unavailable; the legacy stream then fails before a chunk.
-        mock_provider.chat_stream_response.side_effect = NotImplementedError
+        # Structured streaming declared unsupported; the legacy stream then fails before a chunk.
+        mock_provider.SUPPORTS_STRUCTURED_STREAMING = False
         mock_provider.chat_stream.side_effect = RuntimeError("stream unavailable")
         repl = self._direct_failure_repl(stream=True, provider=mock_provider)
 
@@ -1509,6 +1510,7 @@ class TestREPL(unittest.TestCase):
             repl.chat("你好呀")
 
         mock_provider.chat_stream.assert_called_once()
+        mock_provider.chat_stream_response.assert_not_called()
         self._assert_direct_failure_surfaced(repl, mock_agent_loop)
 
     def test_direct_non_stream_failure_surfaces_without_agent_loop_request(self):
@@ -1550,9 +1552,14 @@ class TestREPL(unittest.TestCase):
         with patch('src.repl.core.run_agent_loop') as mock_agent_loop:
             repl.chat("你好呀")
 
+        mock_provider.chat_stream_response.assert_called_once()
         mock_provider.chat_stream.assert_not_called()
         mock_provider.chat.assert_not_called()
-        self._assert_direct_failure_surfaced(repl, mock_agent_loop)
+        mock_agent_loop.assert_not_called()
+        printed = self._printed(repl)
+        self.assertIn("Provider error: the active provider reported an unimplemented operation.", printed)
+        self.assertIn("The request failed. Clawd did not issue a fallback retry.", printed)
+        self.assertNotIn(self._EMPTY_NOTICE, printed)
 
     def test_direct_stream_attribute_error_is_never_treated_as_unsupported(self):
         """AttributeError (raised inside the provider, or a missing method) must surface."""
@@ -1625,14 +1632,16 @@ class TestREPL(unittest.TestCase):
             ("stream reasoning only", True,
              {"chat_stream_response": self._empty(usage=usage_9, **reasoning)}, "chat_stream_response", True),
             ("legacy stream yields nothing", True,
-             {"chat_stream_response": NotImplementedError, "chat_stream": iter([])}, "chat_stream", False),
+             {"SUPPORTS_STRUCTURED_STREAMING": False, "chat_stream": iter([])}, "chat_stream", False),
         ]
         for label, stream, behaviour, sent_by, billed in cases:
             with self.subTest(label):
                 provider = Mock()
                 provider.model = "glm-4.5"
                 for method, value in behaviour.items():
-                    if callable(value):  # an exception class or a fake method body
+                    if method == "SUPPORTS_STRUCTURED_STREAMING":  # a declaration, not a method
+                        setattr(provider, method, value)
+                    elif callable(value):  # an exception class or a fake method body
                         getattr(provider, method).side_effect = value
                     else:
                         getattr(provider, method).return_value = value

@@ -24,10 +24,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Skill frontmatter parsing supports inline list syntax such as `arguments: [path]`
 - README and contributor docs prefer `uv`-based setup instructions
 - Direct/provider streaming and agent-loop behavior are documented according to the current runtime
+- Provider method selection is decided before any request: `chat_stream_response` is used only when a provider supports it (`BaseProvider.SUPPORTS_STRUCTURED_STREAMING`, or an override of the method). Plugin providers that raised `NotImplementedError` from `chat_stream_response` to request a fallback must declare `SUPPORTS_STRUCTURED_STREAMING = False` instead (and be re-pinned); the REPL reports a provider `NotImplementedError` with fixed wording and no relogin prompt
 
 ### Security
 - Authentication failures are classified without vendor-SDK coupling and user-facing recovery output does not echo provider exception text
 - Unanswered authentication-rejected turns are removed from conversation state; turns with visible/assistant/tool activity are preserved for review
+- A `NotImplementedError` (or any other error) from a provider method that may already have sent a request never triggers a second request through another method: agent loop, direct stream route, and `/compact` (`chat_async`)
 
 ## [0.1.0] - 2026-04-01
 

@@ -87,6 +87,7 @@ from src.providers.base import (
     ChatResponse,
     FinishStatusError,
     IncompleteResponseError,
+    supports_structured_streaming,
 )
 from src.providers.minimax_provider import MinimaxProvider
 from src.tool_system.context import ToolContext
@@ -1308,8 +1309,8 @@ class ClawdREPL:
         # the agent route may then take over. Once a provider call has been made,
         # a failure raises and an empty reply returns _EmptyDirectReply. Both end
         # the turn; neither may fall through to the agent route (a second request).
-        # NotImplementedError from chat_stream_response before any chunk is treated
-        # as unsupported (nothing sent) and uses the legacy chat_stream in this route.
+        # In stream mode the provider method is chosen before anything is sent
+        # (supports_structured_streaming); it is never swapped for another one.
         try:
             api_messages, call_kwargs = self._build_direct_stream_payload()
         except Exception:
@@ -1328,24 +1329,13 @@ class ClawdREPL:
         def capture_chunk(chunk: str) -> None:
             if not chunk:
                 return
-            # Recorded before display so a display error is never mistaken for "unsupported".
             streamed_chunks.append(chunk)
             if on_text_chunk is not None:
                 on_text_chunk(chunk)
 
-        try:
-            response = self.provider.chat_stream_response(
-                api_messages,
-                tools=None,
-                on_text_chunk=capture_chunk,
-                **call_kwargs,
-            )
-        except NotImplementedError:
-            if streamed_chunks:
-                raise
-            # Provider has no structured stream result. Preserve the old stream path,
-            # but usage will be unavailable for this direct response.
-            api_messages, call_kwargs = self._build_direct_stream_payload()
+        if not supports_structured_streaming(self.provider):
+            # No structured stream result: the legacy text stream is the only request
+            # (usage is unavailable for this direct response).
             for chunk in self.provider.chat_stream(api_messages, tools=None, **call_kwargs):
                 capture_chunk(chunk)
             if not streamed_chunks:
@@ -1354,6 +1344,12 @@ class ClawdREPL:
             self.session.conversation.add_assistant_message(full_response)
             return {"content": full_response, "usage": {}}
 
+        response = self.provider.chat_stream_response(
+            api_messages,
+            tools=None,
+            on_text_chunk=capture_chunk,
+            **call_kwargs,
+        )
         if not isinstance(response, ChatResponse):
             raise TypeError("Structured streaming must return ChatResponse")
         full_response = getattr(response, "content", "") or "".join(streamed_chunks)
@@ -1886,6 +1882,16 @@ class ClawdREPL:
                     pre_task_messages=pre_task_messages,
                     added_user_message=added_user_message,
                 )
+            elif isinstance(e, NotImplementedError):
+                # Also before the auth classifier: a provider's text (e.g. "401") never
+                # triggers a relogin. Fixed wording; the request is never retried.
+                self.console.print(
+                    "\n[red]Provider error: the active provider reported an unimplemented "
+                    "operation.[/red]"
+                )
+                self.console.print("[dim]The request failed. Clawd did not issue a fallback retry.[/dim]")
+                import traceback
+                traceback.print_exc()
             elif _is_provider_authentication_error(e):
                 current_messages = self.session.conversation.messages
                 clean_unanswered_turn = current_messages == pre_task_messages

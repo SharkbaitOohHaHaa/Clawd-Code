@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import inspect
 import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, Callable, Generator, NamedTuple, Optional, TypeAlias
+from typing import Any, Callable, ClassVar, Generator, NamedTuple, Optional, TypeAlias
 
 
 @dataclass
@@ -253,6 +254,12 @@ TextChunkCallback: TypeAlias = Callable[[str], None]
 class BaseProvider(ABC):
     """Base class for LLM providers."""
 
+    # Whether Clawd may call chat_stream_response. True / False declare it (a plain bool on
+    # the class or set on the instance, e.g. per model in __init__); None derives it: only a
+    # class that keeps BaseProvider's own chat_stream_response is unsupported. Decided before
+    # any provider method runs (see supports_structured_streaming).
+    SUPPORTS_STRUCTURED_STREAMING: ClassVar[Optional[bool]] = None
+
     def __init__(
         self, api_key: str, base_url: Optional[str] = None, model: Optional[str] = None
     ):
@@ -314,8 +321,10 @@ class BaseProvider(ABC):
     ) -> ChatResponse:
         """Stream a response while also returning the final structured ChatResponse.
 
-        Providers may override this to support tool-aware streaming. The default
-        implementation signals that rich streamed responses are unavailable.
+        Providers may override this to support tool-aware streaming. Clawd decides whether to
+        call it before sending anything (supports_structured_streaming); a provider without it
+        gets chat() / chat_stream() instead. Once called, any exception it raises (including
+        NotImplementedError) ends the attempt: Clawd never tries another provider method.
         """
         raise NotImplementedError("Structured streaming is not supported by this provider")
 
@@ -342,3 +351,25 @@ class BaseProvider(ABC):
     def _prepare_messages(self, messages: list[MessageInput]) -> list[dict[str, Any]]:
         """Convert provider messages to API dictionary format."""
         return [msg if isinstance(msg, dict) else msg.to_dict() for msg in messages]
+
+
+def supports_structured_streaming(provider: Any) -> bool:
+    """Decide, before calling any provider method, whether to use chat_stream_response.
+
+    Static only: never runs properties, descriptors or __getattr__. A plain bool
+    SUPPORTS_STRUCTURED_STREAMING on the instance or its class is honored; anything else
+    derives from the class: unsupported only if chat_stream_response is exactly
+    BaseProvider's. When that cannot be determined, supported, so an error surfaces instead
+    of being taken as "unsupported" (an exception never proves that nothing was sent).
+    """
+    try:
+        declared = inspect.getattr_static(provider, "SUPPORTS_STRUCTURED_STREAMING", None)
+    except Exception:
+        declared = None
+    if isinstance(declared, bool):
+        return declared
+    try:
+        implementation = inspect.getattr_static(type(provider), "chat_stream_response")
+    except Exception:
+        return True
+    return implementation is not BaseProvider.__dict__["chat_stream_response"]

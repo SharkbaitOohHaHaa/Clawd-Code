@@ -13,7 +13,7 @@ from ..agent.conversation import Conversation, TextContentBlock, ToolUseContentB
 from ..context_system import build_context_prompt
 from ..context_system.microcompact import microcompact_messages, strip_images_from_messages
 from ..outputStyles import resolve_output_style
-from ..providers.base import BaseProvider, ChatResponse
+from ..providers.base import BaseProvider, ChatResponse, supports_structured_streaming
 from ..providers.anthropic_provider import AnthropicProvider
 from ..providers.minimax_provider import MinimaxProvider
 from ..token_estimation import count_messages_tokens, count_tokens
@@ -160,37 +160,28 @@ def _call_provider_for_turn(
     stream: bool,
     on_text_chunk: TextChunkHandler | None,
 ) -> tuple[Any, bool]:
-    """Call the provider, preferring structured streaming when available.
+    """Call the provider once, preferring structured streaming when available.
 
-    Only a provider that reports structured streaming as unsupported
-    (NotImplementedError) before any chunk arrives falls back to chat(). Every
-    other failure surfaces without a second request.
+    The method is chosen before anything is sent (supports_structured_streaming). Any
+    failure of the chosen method surfaces: no exception, NotImplementedError included, can
+    prove that nothing was sent, so no other provider method is ever tried.
 
     Returns (response, streamed_live_text).
     """
-    if stream:
-        provider_chunk_received = False
+    if stream and supports_structured_streaming(provider):
 
         def forward_chunk(chunk: str) -> None:
-            nonlocal provider_chunk_received
-            # Mark before display so a display error is never mistaken for "unsupported".
-            provider_chunk_received = True
             if on_text_chunk is not None:
                 on_text_chunk(chunk)
 
-        try:
-            response = provider.chat_stream_response(
-                api_messages,
-                on_text_chunk=forward_chunk,
-                **call_kwargs,
-            )
-        except NotImplementedError:
-            if provider_chunk_received:
-                raise
-        else:
-            if not isinstance(response, ChatResponse):
-                raise TypeError("Structured streaming must return ChatResponse")
-            return response, True
+        response = provider.chat_stream_response(
+            api_messages,
+            on_text_chunk=forward_chunk,
+            **call_kwargs,
+        )
+        if not isinstance(response, ChatResponse):
+            raise TypeError("Structured streaming must return ChatResponse")
+        return response, True
 
     response = provider.chat(api_messages, **call_kwargs)
     return response, False
