@@ -70,10 +70,11 @@ class MinimalPlugin(BaseProvider):
         super().__init__(api_key, base_url, model or "plugin-model")
         self.ledger: list[str] = []
         self.legacy_chunks = ["legacy ", "text"]
+        self.chat_text = "done"
 
     def chat(self, messages, tools=None, **kwargs):
         self.ledger.append("chat")
-        return reply()
+        return reply(self.chat_text)
 
     def chat_stream(self, messages, tools=None, **kwargs):
         self.ledger.append("chat_stream")
@@ -558,20 +559,21 @@ class TestReplDirectRouteSendState(OfflineCase):
     def _history(repl: ClawdREPL) -> list[tuple[str, Any]]:
         return [(m.role, m.content) for m in repl.session.conversation.messages]
 
-    def test_unsupported_provider_uses_only_the_legacy_stream(self) -> None:
+    def test_unsupported_provider_uses_one_chat_request_in_stream_mode(self) -> None:
         provider = MinimalPlugin()
         repl = _make_repl(provider, stream=True, root=self.tmp)
         printed, *_ = self._chat(repl)
-        self.assertEqual(provider.ledger, ["chat_stream"])
-        self.assertEqual(self._history(repl), [("user", "你好呀"), ("assistant", "legacy text")])
+        self.assertEqual(provider.ledger, ["chat"])
+        self.assertEqual(self._history(repl), [("user", "你好呀"), ("assistant", "done")])
+        self.assertEqual(printed.count("done"), 1)
         self.assertIn("did not return token counts", printed)
 
-    def test_declared_unsupported_empty_legacy_keeps_the_e7_outcome(self) -> None:
+    def test_declared_unsupported_empty_chat_keeps_the_e7_outcome(self) -> None:
         provider = DeclaredUnsupported()
-        provider.legacy_chunks = []
+        provider.chat_text = ""
         repl = _make_repl(provider, stream=True, root=self.tmp)
         printed, ledger, *_ = self._chat(repl)
-        self.assertEqual(provider.ledger, ["chat_stream"])
+        self.assertEqual(provider.ledger, ["chat"])
         self.assertEqual(printed.count(EMPTY_NOTICE), 1)
         self.assertEqual(self._history(repl), [])  # E7 rollback of the unanswered turn
         ledger.assert_not_called()

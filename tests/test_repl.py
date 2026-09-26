@@ -1413,8 +1413,8 @@ class TestREPL(unittest.TestCase):
                     self.assertGreaterEqual(rendered.count("Usage this task:"), 2)
                     self.assertEqual(repl.tool_context.usage_records, [])
 
-    def test_chat_uses_true_api_stream_for_simple_prompt(self):
-        """Simple prompts should use provider.chat_stream when stream mode is enabled."""
+    def test_chat_stream_mode_without_structured_streaming_uses_one_chat_request(self):
+        """Stream mode, no structured streaming: one chat() request, its reply shown once, raw."""
         with patch('src.config.get_config_path', return_value=self.config_dir / "config.json"):
             with patch('src.repl.core.Session.create') as mock_session_factory:
                 mock_session = Mock()
@@ -1424,9 +1424,11 @@ class TestREPL(unittest.TestCase):
                 with patch('src.repl.core.get_provider_class') as mock_provider_class:
                     mock_provider = Mock()
                     mock_provider.model = "glm-4.5"
-                    # Structured streaming declared unsupported: the legacy chunk stream is chosen.
+                    # Structured streaming declared unsupported: one chat() request is chosen.
                     mock_provider.SUPPORTS_STRUCTURED_STREAMING = False
-                    mock_provider.chat_stream.return_value = iter(["你", "好"])
+                    mock_provider.chat.return_value = ChatResponse(
+                        content="你好", model="glm-4.5", usage={}, finish_reason="stop", tool_uses=None
+                    )
                     mock_provider_class.return_value = Mock(return_value=mock_provider)
 
                     repl = ClawdREPL(provider_name="glm", stream=True)
@@ -1435,7 +1437,8 @@ class TestREPL(unittest.TestCase):
                     with patch('src.repl.core.run_agent_loop') as mock_agent_loop:
                         repl.chat("你是谁")
 
-                    mock_provider.chat_stream.assert_called_once()
+                    mock_provider.chat.assert_called_once()
+                    mock_provider.chat_stream.assert_not_called()
                     mock_provider.chat_stream_response.assert_not_called()
                     mock_agent_loop.assert_not_called()
                     self.assertFalse(any(
@@ -1443,6 +1446,7 @@ class TestREPL(unittest.TestCase):
                         for args, _kwargs in repl.console.print.call_args_list
                     ))
                     self.assertNotIn(self._EMPTY_NOTICE, self._printed(repl))
+                    self.assertEqual(self._printed(repl).count("你好"), 1)
                     self.assertEqual(len(mock_session.conversation.messages), 2)
                     self.assertEqual(mock_session.conversation.messages[1].role, "assistant")
                     self.assertEqual(mock_session.conversation.messages[1].content, "你好")
@@ -1497,19 +1501,20 @@ class TestREPL(unittest.TestCase):
         self.assertIn("The request failed. Clawd did not issue a fallback retry.", printed)
         self.assertNotIn(self._EMPTY_NOTICE, printed)
 
-    def test_chat_stream_legacy_failure_surfaces_without_agent_loop_request(self):
-        """A real legacy-stream failure is shown; it never turns into a second (agent) request."""
+    def test_chat_stream_mode_unsupported_failure_surfaces_without_agent_loop_request(self):
+        """A chat() failure in stream mode is shown; it never turns into a second request."""
         mock_provider = Mock()
         mock_provider.model = "glm-4.5"
-        # Structured streaming declared unsupported; the legacy stream then fails before a chunk.
+        # Structured streaming declared unsupported; the one chat() request then fails.
         mock_provider.SUPPORTS_STRUCTURED_STREAMING = False
-        mock_provider.chat_stream.side_effect = RuntimeError("stream unavailable")
+        mock_provider.chat.side_effect = RuntimeError("service unavailable")
         repl = self._direct_failure_repl(stream=True, provider=mock_provider)
 
         with patch('src.repl.core.run_agent_loop') as mock_agent_loop:
             repl.chat("你好呀")
 
-        mock_provider.chat_stream.assert_called_once()
+        mock_provider.chat.assert_called_once()
+        mock_provider.chat_stream.assert_not_called()
         mock_provider.chat_stream_response.assert_not_called()
         self._assert_direct_failure_surfaced(repl, mock_agent_loop)
 
@@ -1631,8 +1636,10 @@ class TestREPL(unittest.TestCase):
              {"chat_stream_response": empty_after_blank_chunk}, "chat_stream_response", False),
             ("stream reasoning only", True,
              {"chat_stream_response": self._empty(usage=usage_9, **reasoning)}, "chat_stream_response", True),
-            ("legacy stream yields nothing", True,
-             {"SUPPORTS_STRUCTURED_STREAMING": False, "chat_stream": iter([])}, "chat_stream", False),
+            ("stream mode, declared unsupported, empty chat()", True,
+             {"SUPPORTS_STRUCTURED_STREAMING": False, "chat": self._empty()}, "chat", False),
+            ("stream mode, declared unsupported, empty chat() with usage", True,
+             {"SUPPORTS_STRUCTURED_STREAMING": False, "chat": self._empty(usage=usage_9)}, "chat", True),
         ]
         for label, stream, behaviour, sent_by, billed in cases:
             with self.subTest(label):

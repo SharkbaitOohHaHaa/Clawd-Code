@@ -1309,19 +1309,24 @@ class ClawdREPL:
         # the agent route may then take over. Once a provider call has been made,
         # a failure raises and an empty reply returns _EmptyDirectReply. Both end
         # the turn; neither may fall through to the agent route (a second request).
-        # In stream mode the provider method is chosen before anything is sent
-        # (supports_structured_streaming); it is never swapped for another one.
+        # The provider method is chosen before anything is sent and is never swapped
+        # for another one: chat_stream_response() only in stream mode for a provider
+        # with structured streaming (supports_structured_streaming), chat() otherwise.
+        # The legacy chat_stream() is never called: it reports no finish status or usage.
         try:
             api_messages, call_kwargs = self._build_direct_stream_payload()
         except Exception:
             return None
 
-        if not self.stream:
+        if not self.stream or not supports_structured_streaming(self.provider):
             response = self.provider.chat(api_messages, tools=None, **call_kwargs)
             full_response = getattr(response, "content", "") or ""
             if not full_response:
                 return _EmptyDirectReply(getattr(response, "usage", None))
             self.session.conversation.add_assistant_message(full_response)
+            if self.stream and on_text_chunk is not None:
+                # Nothing was shown live: show the complete reply once, after storing it.
+                on_text_chunk(full_response)
             return response
 
         streamed_chunks: list[str] = []
@@ -1332,17 +1337,6 @@ class ClawdREPL:
             streamed_chunks.append(chunk)
             if on_text_chunk is not None:
                 on_text_chunk(chunk)
-
-        if not supports_structured_streaming(self.provider):
-            # No structured stream result: the legacy text stream is the only request
-            # (usage is unavailable for this direct response).
-            for chunk in self.provider.chat_stream(api_messages, tools=None, **call_kwargs):
-                capture_chunk(chunk)
-            if not streamed_chunks:
-                return _EmptyDirectReply()
-            full_response = "".join(streamed_chunks)
-            self.session.conversation.add_assistant_message(full_response)
-            return {"content": full_response, "usage": {}}
 
         response = self.provider.chat_stream_response(
             api_messages,
@@ -1551,8 +1545,9 @@ class ClawdREPL:
         self, error: IncompleteResponseError, *, stream_started: bool, earlier_turns_completed: bool
     ) -> None:
         """Keep an output-limit response as partial; never present it as a complete answer."""
-        if error.partial_text and not self.stream:
-            # Non-stream mode has not shown anything yet; stream mode already showed it live.
+        if error.partial_text and not stream_started:
+            # No response text was shown live (non-stream mode, a chat() request in stream
+            # mode, or an error before the first chunk): show the partial text once now.
             self.console.print(error.partial_text, markup=False, highlight=False, soft_wrap=True)
         if stream_started:
             self.console.print()
@@ -1627,8 +1622,9 @@ class ClawdREPL:
             and bool(messages)
             and messages[-1] is added_user_message
         )
-        if error.partial_text and not blocked and not self.stream:
-            # Non-stream mode has not shown anything yet; stream mode already showed it live.
+        if error.partial_text and not blocked and not stream_started:
+            # No response text was shown live (non-stream mode, a chat() request in stream
+            # mode, or an error before the first chunk): show the partial text once now.
             self.console.print(error.partial_text, markup=False, highlight=False, soft_wrap=True)
         if stream_started:
             self.console.print()
@@ -1637,8 +1633,8 @@ class ClawdREPL:
         self.console.print(headline, style="yellow", markup=False, highlight=False, emoji=False)
         if error.category == "paused":
             self.console.print("[yellow]Clawd does not resume paused turns automatically.[/yellow]")
-        if blocked and self.stream and error.partial_text:
-            # This response's own text was delivered live before the provider's status arrived.
+        if blocked and stream_started and error.partial_text:
+            # This response's own text was shown live before the provider's status arrived.
             self.console.print(
                 "[yellow]The streamed text above was blocked by the provider; it is not a complete "
                 "answer and was not kept in the conversation.[/yellow]"

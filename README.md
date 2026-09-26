@@ -77,7 +77,7 @@
 >>> /render-last
 ```
 
-- True API streaming for direct replies plus richer streaming during tool-driven agent loops
+- True API streaming for direct replies (providers with structured streaming) plus richer streaming during tool-driven agent loops
 - Built-in `/stream` toggle for live output and `/render-last` for clean Markdown re-rendering on demand
 - Designed for real terminal demos: streaming text, visible tool activity, and stable fallback behavior
 
@@ -353,13 +353,13 @@ Each workflow is registered as a plugin `PromptCommand` with `kind="workflow"`. 
 
 An exact-hash operator-approved plugin that declares `providers` in `plugin.json` may export `PROVIDERS`, a list of dicts (`name`, `label`, `provider_class`, `default_base_url`, `default_model`, `available_models`, `requires_api_key`, `local_only`). `provider_class` must be a concrete `src.providers.base.BaseProvider` subclass whose constructor accepts `api_key`, `base_url` and `model`.
 
-- **Required methods:** `chat`, `chat_stream`, `get_available_models`.
-- **Optional:** `chat_stream_response` (structured streaming: live text plus a final `ChatResponse` with tool calls).
+- **Required methods:** `chat`, `chat_stream`, `get_available_models`. `chat_stream` is still required by the current `BaseProvider` interface, but Clawd's conversation runtime no longer calls it.
+- **Optional:** `chat_stream_response` (structured streaming: live text plus a final `ChatResponse` with tool calls). Live token-by-token text in stream mode requires it.
 - **`SUPPORTS_STRUCTURED_STREAMING`:** a plain `bool` on the class, or set on the instance in `__init__` (for example per model). `True`/`False` declare support; `None` (the default) means Clawd detects it: a class that overrides `chat_stream_response` supports it, one that keeps the `BaseProvider` default does not. Clawd reads it statically and never runs a property for it.
-- With `False` (or no override), Clawd chooses `chat()` / `chat_stream()` **before sending anything** and never calls `chat_stream_response`.
+- With `False` (or no override), Clawd chooses `chat()` **before sending anything** and never calls `chat_stream_response`: each conversation request (direct and agent routes) is one `chat()` request, even with the REPL's stream setting on, and its full reply appears when it is complete instead of token by token.
 - Do not raise `NotImplementedError` from a `chat_stream_response` override to ask for a fallback. Once Clawd has chosen a provider method, any exception from it (including `NotImplementedError`) ends that provider attempt; Clawd shows it and does not try another provider method, because it cannot know whether a request was already sent.
 - `chat_async` is not part of the `BaseProvider` contract. If a plugin defines it, `/compact` calls it first: a `NotImplementedError` from it ends the compaction, while any other exception is currently retried once through `chat()` (a known limitation). Do not define `chat_async` unless it works.
-- Clawd's SDK retry/redirect policy and its output-limit, finish-status and malformed tool-argument checks run inside the built-in providers only; a direct `BaseProvider` plugin must handle those itself. Tool-input schema validation and permission checks apply to every provider.
+- Clawd's SDK retry/redirect policy and its output-limit, finish-status and malformed tool-argument checks run inside the built-in providers only; a direct `BaseProvider` plugin must handle those itself (its own provider-specific completion semantics included). A subclass of a built-in provider that declares `SUPPORTS_STRUCTURED_STREAMING = False` keeps the parent's output-limit and finish-status checks through the inherited `chat()`, unless it overrides that behavior; the finish-status checks are those of the parent's profile. Tool-input schema validation and permission checks apply to every provider.
 - Editing a trusted plugin changes its hash: re-pin the new exact hash in `~/.clawd/python_plugins.json`, or the plugin stays inactive.
 
 ```python
@@ -575,7 +575,7 @@ If you find this useful, please **star** ⭐ the repo!
 >>> /render-last
 ```
 
-- 直接回答支持真实 API 流式输出，带工具的 agent loop 也具备更完整的流式体验
+- 直接回答支持真实 API 流式输出（适用于支持结构化流式的 provider），带工具的 agent loop 也具备更完整的流式体验
 - 内置 `/stream` 开关用于实时输出，`/render-last` 可按需把上一条回答重新渲染为 Markdown
 - 专门为终端演示优化：一边看回答流出，一边看到工具调用，并保留稳定回退路径
 

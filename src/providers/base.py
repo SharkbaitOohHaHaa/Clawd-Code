@@ -300,7 +300,11 @@ class BaseProvider(ABC):
         tools: Optional[list[dict[str, Any]]] = None,
         **kwargs
     ) -> Generator[str, None, None]:
-        """Streaming chat completion.
+        """Streaming chat completion (legacy text-only stream).
+
+        Still required by this interface, but Clawd's conversation runtime does not call
+        it: it yields text only, with no finish status or usage. Live text in stream mode
+        comes from chat_stream_response.
 
         Args:
             messages: List of chat messages
@@ -323,8 +327,9 @@ class BaseProvider(ABC):
 
         Providers may override this to support tool-aware streaming. Clawd decides whether to
         call it before sending anything (supports_structured_streaming); a provider without it
-        gets chat() / chat_stream() instead. Once called, any exception it raises (including
-        NotImplementedError) ends the attempt: Clawd never tries another provider method.
+        gets one chat() request instead, in stream mode too (its reply is shown when complete).
+        Once called, any exception it raises (including NotImplementedError) ends the attempt:
+        Clawd never tries another provider method.
         """
         raise NotImplementedError("Structured streaming is not supported by this provider")
 
