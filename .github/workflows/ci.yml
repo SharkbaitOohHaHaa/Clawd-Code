@@ -77,6 +77,9 @@ jobs:
       - name: Windows updater regression
         run: uv run --locked python -m unittest tests.test_update_scripts
 
+      - name: Windows read-fingerprint regression
+        run: uv run --locked pytest tests/test_read_fingerprint.py -q
+
   package:
     name: Build package
     runs-on: ubuntu-latest

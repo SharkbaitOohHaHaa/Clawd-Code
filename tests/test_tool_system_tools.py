@@ -100,7 +100,12 @@ class TestReadTool(ToolSystemTests):
         p = self.root / "fingerprint.txt"
         p.write_text("AAAA\n", encoding="utf-8")
         FileReadTool().run({"file_path": str(p)}, self.ctx)
+        before = p.stat()
         p.write_text("BBBB\n", encoding="utf-8")
+        # Force the (st_mtime_ns, st_size) collision so this never depends on timing.
+        os.utime(p, ns=(before.st_atime_ns, before.st_mtime_ns))
+        after = p.stat()
+        self.assertEqual((after.st_mtime_ns, after.st_size), (before.st_mtime_ns, before.st_size))
         self.assertFalse(self.ctx.was_file_read_and_unchanged(p))
 
     def test_read_notebook(self) -> None:
@@ -302,7 +307,7 @@ class TestNotebookEditTool(ToolSystemTests):
     def test_rejects_wrong_extension_and_missing_cell(self) -> None:
         wrong = self.root / "notebook.json"
         wrong.write_text('{"cells":[]}', encoding="utf-8")
-        self.ctx.mark_file_read(wrong)
+        self.ctx.mark_file_read(wrong, data=wrong.read_bytes())
         with self.assertRaises(Exception):
             NotebookEditTool().run(
                 {

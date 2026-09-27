@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import io
 import json
 import mimetypes
 from pathlib import Path
@@ -12,6 +13,13 @@ from ..permission_handler import PermissionResult
 from ..permissions import sensitive_path_permission
 from ..protocol import ToolResult
 from ..registry import ToolSpec
+
+
+def _decode_like_read_text(data: bytes) -> str:
+    """Decode exactly as Path.read_text(encoding="utf-8", errors="replace") does,
+    including universal-newline translation."""
+    with io.TextIOWrapper(io.BytesIO(data), encoding="utf-8", errors="replace") as handle:
+        return handle.read()
 
 
 class FileReadTool:
@@ -90,11 +98,15 @@ class FileReadTool:
         if suffix == ".ipynb":
             return self._read_notebook(path, context)
 
-        if context.was_file_read_and_unchanged(path) and pages is None and tool_input.get("offset") is None and tool_input.get("limit") is None:
+        # Only a Read without pages/offset/limit may take the unchanged shortcut: a ranged
+        # Read never evaluates the check (no extra full read and hash) or gets the stub.
+        if pages is None and tool_input.get("offset") is None and tool_input.get("limit") is None and context.was_file_read_and_unchanged(path):
             return ToolResult(name="Read", output={"type": "file_unchanged", "file": {"filePath": str(path)}})
 
         try:
-            text = path.read_text(encoding="utf-8", errors="replace")
+            # Read once; the model's text and the fingerprint come from this one buffer.
+            data = path.read_bytes()
+            text = _decode_like_read_text(data)
         except Exception as e:
             raise ToolExecutionError(str(e)) from e
 
@@ -105,7 +117,7 @@ class FileReadTool:
         numbered = "\n".join(f"{i + offset}\t{line}" for i, line in enumerate(sliced))
         if numbered == "" and text == "":
             numbered = ""
-        context.mark_file_read(path)
+        context.mark_file_read(path, data=data)
         return ToolResult(
             name="Read",
             output={
@@ -132,7 +144,7 @@ class FileReadTool:
                 is_error=True,
             )
         encoded = base64.b64encode(data).decode("ascii")
-        context.mark_file_read(path)
+        context.mark_file_read(path, data=data)
         return ToolResult(
             name="Read",
             output={
@@ -153,7 +165,7 @@ class FileReadTool:
         if len(data) > 5 * 1024 * 1024:
             return ToolResult(name="Read", output={"error": f"pdf too large to inline: {path} ({len(data)} bytes)"}, is_error=True)
         encoded = base64.b64encode(data).decode("ascii")
-        context.mark_file_read(path)
+        context.mark_file_read(path, data=data)
         return ToolResult(
             name="Read",
             output={"type": "pdf", "file": {"filePath": str(path), "base64": encoded, "originalSize": len(data)}},
@@ -161,14 +173,15 @@ class FileReadTool:
 
     def _read_notebook(self, path: Path, context: ToolContext) -> ToolResult:
         try:
-            raw = path.read_text(encoding="utf-8", errors="replace")
+            raw_bytes = path.read_bytes()
+            raw = _decode_like_read_text(raw_bytes)
             data = json.loads(raw)
         except Exception as e:
             return ToolResult(name="Read", output={"error": f"failed to parse notebook: {e}"}, is_error=True)
         cells = data.get("cells")
         if not isinstance(cells, list):
             return ToolResult(name="Read", output={"error": "no cells found in notebook"}, is_error=True)
-        context.mark_file_read(path)
+        context.mark_file_read(path, data=raw_bytes)
         return ToolResult(name="Read", output={"type": "notebook", "file": {"filePath": str(path), "cells": cells}})
 
     def _is_blocked_device_path(self, path: Path) -> bool:

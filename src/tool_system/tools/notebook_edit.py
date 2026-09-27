@@ -45,14 +45,13 @@ def _new_cell_id(cells: list[Any]) -> str:
     raise ToolExecutionError("failed to generate a unique notebook cell id")
 
 
-def _write_notebook_atomic(path: Path, data: dict[str, Any]) -> None:
-    payload = json.dumps(data, ensure_ascii=False, indent=1) + "\n"
+def _write_notebook_atomic(path: Path, data: dict[str, Any]) -> bytes:
+    """Replace ``path`` atomically and return exactly the bytes written."""
+    payload = (json.dumps(data, ensure_ascii=False, indent=1) + "\n").encode("utf-8")
     temp_path: Path | None = None
     try:
         with tempfile.NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
-            newline="\n",
+            mode="wb",
             dir=str(path.parent),
             prefix=f".{path.name}.",
             suffix=".tmp",
@@ -70,6 +69,7 @@ def _write_notebook_atomic(path: Path, data: dict[str, Any]) -> None:
                 temp_path.unlink(missing_ok=True)
             except OSError:
                 pass
+    return payload
 
 
 class NotebookEditTool:
@@ -205,8 +205,8 @@ class NotebookEditTool:
                     existing.pop("execution_count", None)
                     existing.pop("outputs", None)
 
-        _write_notebook_atomic(path, data)
-        context.mark_file_read(path)
+        written = _write_notebook_atomic(path, data)
+        context.mark_file_read(path, data=written)
         return ToolResult(
             name="NotebookEdit",
             output={

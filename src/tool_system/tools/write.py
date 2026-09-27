@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import difflib
+import os
 from pathlib import Path
 from typing import Any
 
@@ -76,9 +77,12 @@ class FileWriteTool:
                 raise ToolInputError("refusing to overwrite: file must be read first and unchanged since last read")
             original_file = path.read_text(encoding="utf-8", errors="replace")
 
+        # Encoded before anything is touched: exactly the bytes a text-mode UTF-8 write
+        # produces (newline translation included), written and fingerprinted as one buffer.
+        data = content.replace("\n", os.linesep).encode("utf-8")
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(content, encoding="utf-8")
-        context.mark_file_read(path)
+        path.write_bytes(data)
+        context.mark_file_read(path, data=data)
         before_lines = (original_file or "").splitlines(keepends=True)
         after_lines = content.splitlines(keepends=True)
         diff_lines = list(

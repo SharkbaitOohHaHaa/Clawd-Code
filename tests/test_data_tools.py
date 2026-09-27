@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -188,9 +189,15 @@ class DataToolTests(unittest.TestCase):
             tool.run(payload, self.ctx)
 
         DataInspectTool().run({"file_path": str(source)}, self.ctx)
+        before = source.stat()
         source.write_text("id,value\n1,b\n", encoding="utf-8")
+        # Same size; restore the old mtime so (st_mtime_ns, st_size) collides deterministically.
+        os.utime(source, ns=(before.st_atime_ns, before.st_mtime_ns))
+        after = source.stat()
+        self.assertEqual((after.st_mtime_ns, after.st_size), (before.st_mtime_ns, before.st_size))
         with self.assertRaises(ToolInputError):
             tool.run(payload, self.ctx)
+        self.assertFalse(target.exists())
 
     def test_transform_refuses_existing_same_or_invalid_targets(self) -> None:
         source = self.root / "source.csv"

@@ -258,7 +258,8 @@ def _validate_video_bytes(data: bytes, suffix: str, mime: str) -> None:
 def _local_media_data_url(
     path: Path,
     kind: str,
-) -> str:
+) -> tuple[str, bytes]:
+    """Return the data URL and exactly the bytes it was built from."""
     suffix = path.suffix.lower()
     max_bytes = _MAX_IMAGE_BYTES if kind == "image" else _MAX_VIDEO_BYTES
     size = path.stat().st_size
@@ -272,12 +273,12 @@ def _local_media_data_url(
         if declared is None:
             raise ToolInputError(f"unsupported image file extension: {suffix or '<none>'}")
         mime = _validate_image_bytes(data, declared)
-        return _data_url(data, mime, _MAX_IMAGE_BYTES)
+        return _data_url(data, mime, _MAX_IMAGE_BYTES), data
 
     mime, _ = mimetypes.guess_type(str(path))
     mime = mime or ""
     _validate_video_bytes(data, suffix, mime)
-    return _data_url(data, mime, _MAX_VIDEO_BYTES)
+    return _data_url(data, mime, _MAX_VIDEO_BYTES), data
 
 
 def _download_public_media(url: str, kind: str) -> str:
@@ -352,8 +353,8 @@ def _prepare_media(
     if not path.is_file():
         raise ToolInputError(f"media path is not a file: {path}")
 
-    media_value = _local_media_data_url(path, kind)
-    context.mark_file_read(path)
+    media_value, raw = _local_media_data_url(path, kind)
+    context.mark_file_read(path, data=raw)
     return kind, media_value, "workspace_file"
 
 

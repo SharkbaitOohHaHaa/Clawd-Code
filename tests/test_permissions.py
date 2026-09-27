@@ -103,7 +103,7 @@ class TestEditToolPermissions(unittest.TestCase):
         # Create a test file to edit
         self.test_file = self.root / "test.md"
         self.test_file.write_text("original content", encoding="utf-8")
-        self.ctx.mark_file_read(self.test_file)
+        self.ctx.mark_file_read(self.test_file, data=self.test_file.read_bytes())
 
     def tearDown(self) -> None:
         self.tmp.cleanup()

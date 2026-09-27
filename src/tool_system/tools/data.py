@@ -54,12 +54,17 @@ def _append_bounded(rows: list[dict[str, Any]], row: dict[str, Any]) -> None:
     rows.append(row)
 
 
+def _text_handle(raw: bytes, *, encoding: str, newline: str | None = None) -> io.TextIOWrapper:
+    """Text view of in-memory bytes, decoded exactly like path.open("r", ...)."""
+    return io.TextIOWrapper(io.BytesIO(raw), encoding=encoding, newline=newline)
+
+
 def _load_delimited(
-    path: Path, *, delimiter: str
+    raw: bytes, *, delimiter: str
 ) -> tuple[list[dict[str, Any]], list[str]]:
     rows: list[dict[str, Any]] = []
     try:
-        with path.open("r", encoding="utf-8-sig", newline="") as handle:
+        with _text_handle(raw, encoding="utf-8-sig", newline="") as handle:
             reader = csv.reader(handle, delimiter=delimiter)
             try:
                 header = next(reader)
@@ -82,9 +87,10 @@ def _load_delimited(
     return rows, header
 
 
-def _load_json(path: Path) -> list[dict[str, Any]]:
+def _load_json(raw: bytes) -> list[dict[str, Any]]:
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
+        with _text_handle(raw, encoding="utf-8") as handle:
+            value = json.loads(handle.read())
     except UnicodeDecodeError as exc:
         raise ToolInputError("data file is not valid UTF-8 text") from exc
     except json.JSONDecodeError as exc:
@@ -102,10 +108,10 @@ def _load_json(path: Path) -> list[dict[str, Any]]:
     return rows
 
 
-def _load_jsonl(path: Path) -> list[dict[str, Any]]:
+def _load_jsonl(content: bytes) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     try:
-        with path.open("r", encoding="utf-8") as handle:
+        with _text_handle(content, encoding="utf-8") as handle:
             for line_number, raw in enumerate(handle, start=1):
                 if not raw.strip():
                     continue
@@ -129,22 +135,33 @@ def _load_jsonl(path: Path) -> list[dict[str, Any]]:
 
 def _load_rows(
     path: Path,
-) -> tuple[str, int, list[dict[str, Any]], list[str]]:
+) -> tuple[str, int, list[dict[str, Any]], list[str], bytes]:
+    """Parse the file from one read; also return exactly the bytes that were parsed."""
     if path.suffix.lower() not in _SUPPORTED_SUFFIXES:
         _format_name(path)
-    size = _validate_file_size(path)
+    _validate_file_size(path)
     fmt = _format_name(path)
+    try:
+        # Bounded: a file that grew after the size check is never read in full.
+        with path.open("rb") as handle:
+            raw = handle.read(_MAX_INPUT_BYTES + 1)
+    except OSError as exc:
+        raise ToolExecutionError(f"failed to read data file: {exc}") from exc
+    if len(raw) > _MAX_INPUT_BYTES:
+        raise ToolInputError(
+            f"data file exceeds {_MAX_INPUT_BYTES // (1024 * 1024)} MiB limit"
+        )
     if fmt == "csv":
-        rows, columns = _load_delimited(path, delimiter=",")
+        rows, columns = _load_delimited(raw, delimiter=",")
     elif fmt == "tsv":
-        rows, columns = _load_delimited(path, delimiter="\t")
+        rows, columns = _load_delimited(raw, delimiter="\t")
     elif fmt == "json":
-        rows = _load_json(path)
+        rows = _load_json(raw)
         columns = _ordered_columns(rows)
     else:
-        rows = _load_jsonl(path)
+        rows = _load_jsonl(raw)
         columns = _ordered_columns(rows)
-    return fmt, size, rows, columns
+    return fmt, len(raw), rows, columns, raw
 
 
 def _ordered_columns(rows: list[dict[str, Any]]) -> list[str]:
@@ -256,7 +273,8 @@ def _render_rows(
     raise ToolInputError(f"unsupported output format: {output_format}")
 
 
-def _write_new_text(path: Path, payload: str) -> None:
+def _write_new_text(path: Path, payload: str) -> bytes:
+    """Create ``path`` exclusively and return exactly the bytes written."""
     encoded = payload.encode("utf-8")
     if len(encoded) > _MAX_OUTPUT_BYTES:
         raise ToolInputError(
@@ -265,8 +283,8 @@ def _write_new_text(path: Path, payload: str) -> None:
     if not path.parent.exists() or not path.parent.is_dir():
         raise ToolInputError("output parent directory must already exist")
     try:
-        with path.open("x", encoding="utf-8", newline="") as handle:
-            handle.write(payload)
+        with path.open("xb") as handle:
+            handle.write(encoded)
     except FileExistsError as exc:
         raise ToolInputError("refusing to overwrite existing output data file") from exc
     except OSError as exc:
@@ -276,6 +294,7 @@ def _write_new_text(path: Path, payload: str) -> None:
         except OSError:
             pass
         raise ToolExecutionError(f"failed to write transformed data: {exc}") from exc
+    return encoded
 
 
 class DataInspectTool:
@@ -327,8 +346,8 @@ class DataInspectTool:
         path = context.ensure_allowed_path(file_path)
         if not path.exists() or not path.is_file():
             raise ToolInputError(f"data file does not exist: {path}")
-        fmt, size, rows, columns = _load_rows(path)
-        context.mark_file_read(path)
+        fmt, size, rows, columns, raw = _load_rows(path)
+        context.mark_file_read(path, data=raw)
         return ToolResult(
             name="DataInspect",
             output={
@@ -435,7 +454,7 @@ class DataTransformTool:
                 "and unchanged since that read"
             )
 
-        input_format, _size, rows, available_columns = _load_rows(source)
+        input_format, _size, rows, available_columns, _raw = _load_rows(source)
         output_format = _format_name(target)
         available_set = set(available_columns)
 
@@ -475,8 +494,8 @@ class DataTransformTool:
             columns=columns,
             output_format=output_format,
         )
-        _write_new_text(target, payload)
-        context.mark_file_read(target)
+        written = _write_new_text(target, payload)
+        context.mark_file_read(target, data=written)
         return ToolResult(
             name="DataTransform",
             output={

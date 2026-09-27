@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import difflib
+import os
 from typing import Any
 
 from ..context import ToolContext
@@ -93,8 +94,11 @@ class FileEditTool:
             updated = original_file.replace(old, new, 1)
             replaced = 1
 
-        path.write_text(updated, encoding="utf-8")
-        context.mark_file_read(path)
+        # Encoded before the file is touched: exactly the bytes a text-mode UTF-8 write
+        # produces (newline translation included), written and fingerprinted as one buffer.
+        data = updated.replace("\n", os.linesep).encode("utf-8")
+        path.write_bytes(data)
+        context.mark_file_read(path, data=data)
         before_lines = original_file.splitlines(keepends=True)
         after_lines = updated.splitlines(keepends=True)
         diff_lines = list(

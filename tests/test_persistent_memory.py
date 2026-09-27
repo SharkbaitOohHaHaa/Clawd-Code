@@ -345,7 +345,7 @@ class PersistentMemoryTests(unittest.TestCase):
         past.parent.mkdir()
         past.write_text("old", encoding="utf-8")
         ctx = ToolContext(workspace_root=self.workspace)
-        ctx.mark_file_read(past)
+        ctx.mark_file_read(past, data=past.read_bytes())
         edit_permission = FileEditTool().check_permissions(
             {"file_path": str(past), "old_string": "old", "new_string": "new"}, ctx
         )
