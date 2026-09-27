@@ -1035,21 +1035,27 @@ class TestNestedCallers(OfflineCase):
         tool_messages = [m for m in json.loads(self.sent[1].content)["messages"] if m.get("role") == "tool"]
         self.assertEqual(tool_messages[0]["content"], f"Error: {CATEGORY_MESSAGES['blocked']}")
 
-    def test_compact_uses_the_local_fallback_summary_after_one_send(self) -> None:
+    def test_compact_fails_after_one_send_and_keeps_the_conversation(self) -> None:
         cases = [("openai", "content_filter"), ("glm", "sensitive"), ("anthropic", "refusal"),
                  ("deepseek", "aborted")]
         for name, value in cases:
             with self.subTest(provider=name, value=value):
                 provider = shared_provider(name)
-                self.assertFalse(hasattr(provider, "chat_async"))  # today: no async send at all
+                self.assertFalse(hasattr(provider, "chat_async"))  # built-ins: one chat() request
                 conversation = Conversation()
                 conversation.add_user_message("first question")
                 conversation.add_assistant_message("first answer")
+                before = [(m.role, m.content) for m in conversation.messages]
                 self.play(reply(name, False, text="FILTERED-SUMMARY", finish=value))
-                result = _run_without_event_loop(compact_conversation(conversation, provider, "model-x"))
+                try:
+                    _run_without_event_loop(compact_conversation(conversation, provider, "model-x"))
+                    error = None
+                except FinishStatusError as exc:
+                    error = exc
+                self.assertEqual([(m.role, m.content) for m in conversation.messages], before,
+                                 "history replaced by a local summary after the blocked request")
                 self.assertEqual(len(self.sent), 1)
-                self.assertNotIn("FILTERED-SUMMARY", result.summary_text)
-                self.assertIn("first question", result.summary_text)
+                self.assertIsInstance(error, FinishStatusError)
 
 
 if __name__ == "__main__":

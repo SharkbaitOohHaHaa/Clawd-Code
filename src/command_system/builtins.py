@@ -1025,10 +1025,10 @@ async def _compact_async(args: str, context: CommandContext) -> LocalCommandResu
     model = context.config.get("model", "claude-sonnet-4-6")
     custom_instructions = args.strip() or None
 
-    try:
-        # Import here to avoid circular imports
-        from ..compact_service.service import compact_conversation
+    # Import here to avoid circular imports
+    from ..compact_service.service import NotEnoughMessagesToCompactError, compact_conversation
 
+    try:
         result = await compact_conversation(
             conversation=context.conversation,
             provider=provider,
@@ -1082,15 +1082,36 @@ async def _compact_async(args: str, context: CommandContext) -> LocalCommandResu
                 summary_preview=result.summary_text[:200] if len(result.summary_text) > 200 else result.summary_text,
             ),
         )
-    except ValueError as e:
+    except NotEnoughMessagesToCompactError as e:
         return LocalCommandResult(type="text", value=str(e))
     except Exception as e:
+        # The provider may already have been called: report the failure and keep the
+        # conversation as it is (no local fallback, no second provider request).
         import traceback
         traceback.print_exc()
         return LocalCommandResult(
             type="text",
-            value=f"Compact failed: {e}",
+            value=f"Compact failed: {_safe_error_text(e)}",
         )
+
+
+def _safe_error_text(error: BaseException) -> str:
+    """The error's text for a failure message; its type name if formatting fails or is empty."""
+    try:
+        text = str.__str__(str(error))  # an exact str: no subclass method runs below
+        if text.strip():
+            return text
+    except Exception:
+        pass
+    return type(error).__name__
+
+
+def _event_loop_running() -> bool:
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return False
+    return True
 
 
 def compact_command_call(args: str, context: CommandContext) -> LocalCommandResult:
@@ -1104,24 +1125,25 @@ def compact_command_call(args: str, context: CommandContext) -> LocalCommandResu
     Returns:
         LocalCommandResult
     """
-    # Run the async version in a new event loop
-    try:
-        loop = asyncio.get_running_loop()
-        # If we're already in an async context, we can't use asyncio.run
-        # Fall back to sync path
+    if _event_loop_running():
+        # Already inside an event loop, so asyncio.run cannot be used. This is decided before
+        # any provider work: the local-only compaction below is not a second request.
         return _sync_compact_fallback(context)
-    except RuntimeError:
-        # No running event loop — safe to use asyncio.run
-        try:
-            return asyncio.run(_compact_async(args, context))
-        except Exception as e:
-            import traceback
-            traceback.print_exc()
-            return _sync_compact_fallback(context)
+    # Run the async version in a new event loop. Once chosen, the provider may already have
+    # been called when it fails: report the failure and never fall back to the local compaction.
+    try:
+        return asyncio.run(_compact_async(args, context))
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return LocalCommandResult(
+            type="text",
+            value=f"Compact failed: {_safe_error_text(e)}",
+        )
 
 
 def _sync_compact_fallback(context: CommandContext) -> LocalCommandResult:
-    """Synchronous fallback when async provider is not available."""
+    """Local-only compaction (no provider call), used only when an event loop is already running."""
     if not hasattr(context.conversation, "messages"):
         return LocalCommandResult(type="text", value="No conversation to compact.")
 

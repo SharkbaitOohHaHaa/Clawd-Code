@@ -10,7 +10,7 @@ Handles the full compaction flow:
 
 from __future__ import annotations
 
-import logging
+import inspect
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Optional
@@ -24,8 +24,6 @@ from .messages import (
     get_messages_after_boundary,
     is_compact_boundary_message,
 )
-
-logger = logging.getLogger(__name__)
 
 # Maximum output tokens for the summary model
 COMPACT_MAX_OUTPUT_TOKENS = 4096
@@ -51,6 +49,44 @@ Include:
 
 Respond ONLY with plain text. No tools. No XML tags.
 """
+
+_NOT_DECLARED = object()
+
+
+class NotEnoughMessagesToCompactError(ValueError):
+    """Fewer than two messages after the last compact boundary; nothing was requested."""
+
+
+class CompactMethodUndeterminedError(RuntimeError):
+    """The provider's compaction method could not be decided statically; nothing was requested."""
+
+    def __init__(self) -> None:
+        super().__init__("Cannot safely determine the provider's compaction method.")
+
+
+class CompactSummaryError(RuntimeError):
+    """The chosen provider method returned no usable summary text (never retried)."""
+
+    def __init__(self) -> None:
+        super().__init__("Provider returned no usable compact summary.")
+
+
+def _declares_chat_async(provider: Any) -> bool:
+    """Decide, before calling the provider, whether compaction calls chat_async or chat.
+
+    chat_async is optional and not part of BaseProvider. The lookup is static
+    (inspect.getattr_static on the instance): no property, descriptor, __getattr__, instance
+    __getattribute__ or provider method runs to make the choice (a plugin metaclass may still see
+    getattr_static's own class lookups). Any statically visible value other than a plain None
+    declares it; None is an explicit opt-out, and a chat_async reachable only dynamically
+    (__getattr__, proxies) is not declared. If the lookup itself fails, compaction is refused
+    before any provider call.
+    """
+    try:
+        declared = inspect.getattr_static(provider, "chat_async", _NOT_DECLARED)
+    except Exception as exc:
+        raise CompactMethodUndeterminedError() from exc
+    return declared is not _NOT_DECLARED and declared is not None
 
 
 @dataclass
@@ -85,7 +121,7 @@ async def compact_conversation(
     - Hook system (no pre/post compact hooks in Clawd-Code)
 
     Args:
-        conversation: The live Conversation object (mutated in place)
+        conversation: The live Conversation object (mutated in place, only after a usable summary)
         provider: The LLM provider for generating the summary
         model: Model name for the summary call
         custom_instructions: Optional user instructions for the summarizer
@@ -93,12 +129,19 @@ async def compact_conversation(
 
     Returns:
         CompactResult with boundary, summary, and metadata
+
+    Raises:
+        NotEnoughMessagesToCompactError: nothing to compact (no provider call).
+        CompactMethodUndeterminedError: the provider method could not be decided (no call).
+        CompactSummaryError: the provider returned no usable summary text.
+        Any exception from the chosen provider method, unchanged. The conversation is then
+        left as it was, and no other provider method is tried.
     """
     # Step 1: Get messages after the last boundary (skip already-summarized)
     messages = get_messages_after_boundary(conversation.messages)
 
     if len(messages) < 2:
-        raise ValueError("Not enough messages to compact.")
+        raise NotEnoughMessagesToCompactError("Not enough messages to compact.")
 
     # Step 2: Count pre-compact tokens
     from ..token_estimation import count_messages_tokens
@@ -131,41 +174,34 @@ async def compact_conversation(
         "content": prompt,
     })
 
-    # Step 5: Call the LLM to generate summary
-    summary_text = ""
+    # Step 5: Call the LLM to generate summary. Exactly one provider method is chosen before
+    # the provider is called, and it is called once. An exception never proves that nothing
+    # was sent, so no other provider method is ever tried: any failure (or an unusable reply)
+    # ends the compaction and leaves the conversation unchanged.
+    request = {
+        "messages": summary_request_messages,
+        "tools": None,  # No tools during compaction
+        "model": model,
+        "max_tokens": COMPACT_MAX_OUTPUT_TOKENS,
+    }
+    if _declares_chat_async(provider):
+        response = await provider.chat_async(**request)
+    else:
+        response = provider.chat(**request)
+
+    content = getattr(response, "content", None)
+    summary_text = content.strip() if isinstance(content, str) else ""
+    if not summary_text:
+        raise CompactSummaryError()
+
+    # Usage is secondary: a valid summary is kept even when its usage metadata is unreadable.
     response_usage: dict[str, int] = {}
     try:
-        response = await provider.chat_async(
-            messages=summary_request_messages,
-            tools=None,  # No tools during compaction
-            model=model,
-            max_tokens=COMPACT_MAX_OUTPUT_TOKENS,
-        )
-        summary_text = response.content.strip()
-        if isinstance(getattr(response, "usage", None), dict):
-            response_usage = dict(response.usage)
-    except NotImplementedError:
-        # A defined chat_async may already have sent: surface it, never follow it with
-        # provider.chat(). (A provider without chat_async raises AttributeError instead.)
-        raise
-    except Exception as e:
-        # Try sync fallback
-        try:
-            response = provider.chat(
-                messages=summary_request_messages,
-                tools=None,
-                model=model,
-                max_tokens=COMPACT_MAX_OUTPUT_TOKENS,
-            )
-            summary_text = response.content.strip()
-            if isinstance(getattr(response, "usage", None), dict):
-                response_usage = dict(response.usage)
-        except Exception as e2:
-            logger.warning(f"Compact LLM call failed: {e}, sync fallback: {e2}, using text extraction")
-            summary_text = _fallback_summary(messages)
-
-    if not summary_text:
-        summary_text = _fallback_summary(messages)
+        usage = getattr(response, "usage", None)
+        if isinstance(usage, dict):
+            response_usage = dict(usage)
+    except Exception:
+        response_usage = {}
 
     # Step 6: Create boundary marker
     last_msg_uuid = None
@@ -231,58 +267,3 @@ async def compact_conversation(
         user_display_message=user_display,
         usage=response_usage or None,
     )
-
-
-def _fallback_summary(messages: list[Message]) -> str:
-    """
-    Generate a simple text fallback summary when the LLM call fails.
-    """
-    user_msgs: list[str] = []
-    assistant_msgs: list[str] = []
-
-    for msg in messages:
-        role = getattr(msg, 'role', None)
-        if role is None and isinstance(msg, dict):
-            role = msg.get("role")
-
-        content = getattr(msg, 'content', '')
-        if content is None and isinstance(msg, dict):
-            content = msg.get("content", "")
-
-        if role == "user":
-            if isinstance(content, str):
-                user_msgs.append(content[:200])
-            elif isinstance(content, list):
-                for block in content:
-                    if isinstance(block, dict) and block.get("type") == "text":
-                        user_msgs.append(block.get("text", "")[:200])
-        elif role == "assistant":
-            if isinstance(content, str):
-                assistant_msgs.append(content[:200])
-            elif isinstance(content, list):
-                for block in content:
-                    if isinstance(block, dict) and block.get("type") == "text":
-                        assistant_msgs.append(block.get("text", "")[:200])
-
-    summary_parts = [f"Conversation had {len(messages)} messages."]
-
-    # Extract tool use info
-    tool_uses = []
-    for msg in messages:
-        content = getattr(msg, 'content', [])
-        if isinstance(msg, dict):
-            content = msg.get("content", [])
-        if isinstance(content, list):
-            for block in content:
-                if isinstance(block, dict) and block.get("type") == "tool_use":
-                    tool_uses.append(block.get("name", ""))
-
-    if tool_uses:
-        summary_parts.append(f"Tools used: {', '.join(tool_uses[:10])}")
-
-    if user_msgs:
-        summary_parts.append(f"Last user message: {user_msgs[-1][:150]}")
-    if assistant_msgs:
-        summary_parts.append(f"Last assistant message: {assistant_msgs[-1][:150]}")
-
-    return "\n".join(summary_parts)

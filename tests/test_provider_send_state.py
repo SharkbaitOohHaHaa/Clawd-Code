@@ -384,35 +384,30 @@ class TestCapabilityDecision(unittest.TestCase):
 
 
 class TestNoProviderHandlerRetries(unittest.TestCase):
-    """Source guard: no production NotImplementedError handler can lead to another provider call."""
+    """Source guard: production code has no `except NotImplementedError` clause (bare or dotted
+    name, in a try or try* statement), so a provider's NotImplementedError is never special-cased
+    into another call. The /compact method choice is pinned separately by
+    tests/test_compact_send_state.py (TestCompactSourceGuard)."""
 
     @staticmethod
     def _names_nie(node: ast.expr | None) -> bool:
         if node is None:
             return False
         items = node.elts if isinstance(node, ast.Tuple) else [node]
-        return any(isinstance(item, ast.Name) and item.id == "NotImplementedError" for item in items)
+        return any((isinstance(item, ast.Name) and item.id == "NotImplementedError")
+                   or (isinstance(item, ast.Attribute) and item.attr == "NotImplementedError")
+                   for item in items)
 
-    def test_only_compaction_has_one_and_it_re_raises_before_the_generic_handler(self) -> None:
-        found: list[tuple[str, int]] = []
+    def test_no_production_not_implemented_error_handler(self) -> None:
+        try_types = tuple(t for t in (ast.Try, getattr(ast, "TryStar", None)) if t is not None)
+        found: list[str] = []
         for path in sorted(SRC.rglob("*.py")):
             tree = ast.parse(path.read_text(encoding="utf-8-sig"))
             for node in ast.walk(tree):
-                if not isinstance(node, ast.Try):
-                    continue
-                for index, handler in enumerate(node.handlers):
-                    if not self._names_nie(handler.type):
-                        continue
-                    rel = path.relative_to(SRC).as_posix()
-                    found.append((rel, index))
-                    with self.subTest(file=rel, line=handler.lineno):
-                        self.assertEqual(len(handler.body), 1)
-                        self.assertIsInstance(handler.body[0], ast.Raise)
-                        self.assertIsNone(handler.body[0].exc)
-                        broad = [i for i, h in enumerate(node.handlers)
-                                 if isinstance(h.type, ast.Name) and h.type.id in {"Exception", "BaseException"}]
-                        self.assertTrue(all(index < i for i in broad))
-        self.assertEqual([rel for rel, _ in found], ["compact_service/service.py"])
+                if isinstance(node, try_types):
+                    found += [f"{path.relative_to(SRC).as_posix()}:{handler.lineno}"
+                              for handler in node.handlers if self._names_nie(handler.type)]
+        self.assertEqual(found, [])
 
 
 class TestAgentLoopSendState(OfflineCase):
@@ -635,11 +630,16 @@ class TestCompactionSendState(OfflineCase):
                     self._compact(provider)
                 self.assertEqual(provider.ledger, ["chat_async"] if sends_first else [])
 
-    def test_other_chat_async_errors_keep_the_out_of_scope_sync_fallback(self) -> None:
-        """Characterization of a known, separately queued gap (not a statement that it is safe)."""
+    def test_other_chat_async_errors_never_fall_back_to_chat(self) -> None:
+        """Any failure after chat_async was entered surfaces; chat() is never tried afterwards."""
         provider = AsyncPlugin(error=RuntimeError("timeout after send"))
-        self._compact(provider)
-        self.assertEqual(provider.ledger, ["chat_async", "chat"])
+        try:
+            self._compact(provider)
+            error = None
+        except RuntimeError as exc:
+            error = exc
+        self.assertEqual(provider.ledger, ["chat_async"])
+        self.assertIsInstance(error, RuntimeError)
 
 
 class TestDiskLoadedPluginProviders(OfflineCase):

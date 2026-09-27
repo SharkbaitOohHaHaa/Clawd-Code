@@ -131,22 +131,29 @@ class TestCompactConversation(unittest.TestCase):
             asyncio.run(compact_conversation(conv, mock_provider, "claude-sonnet-4-6"))
         self.assertIn("Not enough messages", str(ctx.exception))
 
-    def test_sync_fallback_on_llm_failure(self):
-        """Falls back to sync extraction on LLM failure."""
+    def test_llm_failure_surfaces_and_keeps_the_conversation(self):
+        """A failed summary request ends the compaction: no sync retry, no local summary."""
         from src.compact_service.service import compact_conversation
-        conv = self._make_conversation([
+        messages = [
             Message(role="user", content="Hello world " * 50),
             Message(role="assistant", content="Hi there! " * 50),
             Message(role="user", content="What about the code? " * 50),
-        ])
+        ]
+        conv = self._make_conversation(list(messages))
 
         mock_provider = MagicMock()
         mock_provider.chat_async = AsyncMock(side_effect=Exception("LLM failed"))
-        mock_provider.chat = MagicMock(side_effect=Exception("Sync LLM failed"))
+        mock_provider.chat = MagicMock(side_effect=AssertionError("chat() must not be called"))
 
-        result = asyncio.run(compact_conversation(conv, mock_provider, "claude-sonnet-4-6"))
-        self.assertEqual(result.trigger, "manual")
-        self.assertIn("Conversation had", result.summary_text)
+        try:
+            asyncio.run(compact_conversation(conv, mock_provider, "claude-sonnet-4-6"))
+            error = None
+        except Exception as exc:
+            error = exc
+        mock_provider.chat_async.assert_awaited_once()
+        mock_provider.chat.assert_not_called()
+        self.assertEqual(conv.messages, messages)
+        self.assertEqual(str(error), "LLM failed")
 
     def test_boundary_and_summary_inserted(self):
         """Boundary and summary messages are inserted into conversation."""
