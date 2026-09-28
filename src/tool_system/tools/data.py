@@ -147,6 +147,11 @@ def _load_rows(
             raw = handle.read(_MAX_INPUT_BYTES + 1)
     except OSError as exc:
         raise ToolExecutionError(f"failed to read data file: {exc}") from exc
+    rows, columns = _parse_raw(fmt, raw)
+    return fmt, len(raw), rows, columns, raw
+
+
+def _parse_raw(fmt: str, raw: bytes) -> tuple[list[dict[str, Any]], list[str]]:
     if len(raw) > _MAX_INPUT_BYTES:
         raise ToolInputError(
             f"data file exceeds {_MAX_INPUT_BYTES // (1024 * 1024)} MiB limit"
@@ -161,7 +166,14 @@ def _load_rows(
     else:
         rows = _load_jsonl(raw)
         columns = _ordered_columns(rows)
-    return fmt, len(raw), rows, columns, raw
+    return rows, columns
+
+
+def _rows_from_verified(path: Path, raw: bytes) -> tuple[str, list[dict[str, Any]], list[str]]:
+    """Parse already-verified bytes exactly as _load_rows parses a fresh read."""
+    fmt = _format_name(path)
+    rows, columns = _parse_raw(fmt, raw)
+    return fmt, rows, columns
 
 
 def _ordered_columns(rows: list[dict[str, Any]]) -> list[str]:
@@ -448,13 +460,14 @@ class DataTransformTool:
             raise ToolInputError(f"input data file does not exist: {source}")
         if target.exists():
             raise ToolInputError("refusing to overwrite existing output data file")
-        if not context.was_file_read_and_unchanged(source):
+        verified = context.read_if_unchanged(source)
+        if verified is None:
             raise ToolInputError(
                 "refusing to transform: input data file must be read/inspected first "
                 "and unchanged since that read"
             )
 
-        input_format, _size, rows, available_columns, _raw = _load_rows(source)
+        input_format, rows, available_columns = _rows_from_verified(source, verified)
         output_format = _format_name(target)
         available_set = set(available_columns)
 

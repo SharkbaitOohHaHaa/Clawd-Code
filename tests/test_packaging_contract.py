@@ -161,6 +161,7 @@ class PackagingContractTests(unittest.TestCase):
                 "src/config.py",
                 "src/capabilities.py",
                 "src/context_system/context_analyzer.py",
+                "src/tool_system/compare_write.py",
                 "src/tool_system/tools/data.py",
             ],
         )

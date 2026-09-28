@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import json
 import os
 import tempfile
@@ -7,12 +8,23 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from ..compare_write import still_holds
 from ..context import ToolContext
 from ..errors import ToolExecutionError, ToolInputError, ToolPermissionError
 from ..permission_handler import PermissionResult
 from ..permissions import protected_write_reason, sensitive_path_permission
 from ..protocol import ToolResult
 from ..registry import ToolSpec
+
+
+_REFUSE_NOTEBOOK = "refusing to edit notebook: file must be read first and unchanged since last read"
+
+
+def _decode_like_strict_read_text(raw: bytes) -> str:
+    """Decode exactly as Path.read_text(encoding="utf-8") does: strict errors and
+    universal-newline translation (json.loads(bytes) would also accept BOM/UTF-16)."""
+    with io.TextIOWrapper(io.BytesIO(raw), encoding="utf-8") as handle:
+        return handle.read()
 
 
 def _source_lines(source: str) -> list[str]:
@@ -45,8 +57,11 @@ def _new_cell_id(cells: list[Any]) -> str:
     raise ToolExecutionError("failed to generate a unique notebook cell id")
 
 
-def _write_notebook_atomic(path: Path, data: dict[str, Any]) -> bytes:
-    """Replace ``path`` atomically and return exactly the bytes written."""
+def _write_notebook_atomic(path: Path, data: dict[str, Any], expected: bytes) -> bytes:
+    """Replace ``path`` atomically after re-checking that it still holds exactly
+    ``expected``, and return exactly the bytes written. The re-check is not atomic with
+    the replace: a change (or delete) landing in between is overwritten (or re-created).
+    """
     payload = (json.dumps(data, ensure_ascii=False, indent=1) + "\n").encode("utf-8")
     temp_path: Path | None = None
     try:
@@ -59,6 +74,8 @@ def _write_notebook_atomic(path: Path, data: dict[str, Any]) -> bytes:
         ) as handle:
             handle.write(payload)
             temp_path = Path(handle.name)
+        if not still_holds(path, expected):
+            raise ToolInputError(_REFUSE_NOTEBOOK)
         os.replace(temp_path, path)
         temp_path = None
     except OSError as exc:
@@ -148,13 +165,12 @@ class NotebookEditTool:
             raise ToolInputError("NotebookEdit only supports .ipynb files")
         if not path.exists() or not path.is_file():
             raise ToolInputError(f"notebook does not exist: {path}")
-        if not context.was_file_read_and_unchanged(path):
-            raise ToolInputError(
-                "refusing to edit notebook: file must be read first and unchanged since last read"
-            )
+        verified = context.read_if_unchanged(path)
+        if verified is None:
+            raise ToolInputError(_REFUSE_NOTEBOOK)
 
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
+            data = json.loads(_decode_like_strict_read_text(verified))
         except (OSError, json.JSONDecodeError) as exc:
             raise ToolInputError(f"failed to parse notebook: {exc}") from exc
         if not isinstance(data, dict):
@@ -205,7 +221,7 @@ class NotebookEditTool:
                     existing.pop("execution_count", None)
                     existing.pop("outputs", None)
 
-        written = _write_notebook_atomic(path, data)
+        written = _write_notebook_atomic(path, data, verified)
         context.mark_file_read(path, data=written)
         return ToolResult(
             name="NotebookEdit",

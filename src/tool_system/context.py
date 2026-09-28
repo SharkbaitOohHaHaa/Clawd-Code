@@ -39,32 +39,48 @@ def _open_without_blocking(path: str | os.PathLike[str], flags: int) -> int:
     return os.open(path, flags | _NON_BLOCKING_OPEN_FLAGS)
 
 
-def _file_has_fingerprint(path: Path, recorded: ReadFingerprint) -> bool:
-    """True only if ``path`` is a regular file whose bytes are exactly ``recorded``.
+def _read_matching(handle: Any, recorded: ReadFingerprint, *, keep: bool) -> bytes | None:
+    """Read the open binary ``handle`` from its current position (the start of the
+    file) and return its bytes (b"" unless ``keep``) only if it is a regular file whose
+    bytes are exactly ``recorded``; otherwise None.
 
     Metadata can prove a change (not a regular file, different size) but never
     equality, which needs every byte. At most ``recorded.size + 1`` bytes are read,
     so a file that grows after the size check is still seen as changed and a grown
     file is never hashed in full.
     """
+    info = os.fstat(handle.fileno())
+    if not stat.S_ISREG(info.st_mode) or info.st_size != recorded.size:
+        return None
+    digest = hashlib.sha256()
+    kept: list[bytes] = []
+    consumed = 0
+    remaining = recorded.size + 1
+    while remaining > 0:
+        chunk = handle.read(min(_FINGERPRINT_CHUNK_BYTES, remaining))
+        if chunk is None:  # a non-blocking read would block: not a proven EOF
+            return None
+        if not chunk:
+            break
+        digest.update(chunk)
+        if keep:
+            kept.append(chunk)
+        consumed += len(chunk)
+        remaining -= len(chunk)
+    if consumed != recorded.size or digest.digest() != recorded.sha256:
+        return None
+    return b"".join(kept)
+
+
+def _verified_bytes(path: Path, recorded: ReadFingerprint, *, keep: bool) -> bytes | None:
     # Binary mode is structural: no decoding or newline translation.
     with open(path, "rb", buffering=0, opener=_open_without_blocking) as handle:
-        info = os.fstat(handle.fileno())
-        if not stat.S_ISREG(info.st_mode) or info.st_size != recorded.size:
-            return False
-        digest = hashlib.sha256()
-        consumed = 0
-        remaining = recorded.size + 1
-        while remaining > 0:
-            chunk = handle.read(min(_FINGERPRINT_CHUNK_BYTES, remaining))
-            if chunk is None:  # a non-blocking read would block: not a proven EOF
-                return False
-            if not chunk:
-                break
-            digest.update(chunk)
-            consumed += len(chunk)
-            remaining -= len(chunk)
-    return consumed == recorded.size and digest.digest() == recorded.sha256
+        return _read_matching(handle, recorded, keep=keep)
+
+
+def _file_has_fingerprint(path: Path, recorded: ReadFingerprint) -> bool:
+    """True only if ``path`` is a regular file whose bytes are exactly ``recorded``."""
+    return _verified_bytes(path, recorded, keep=False) is not None
 
 
 @dataclass
@@ -142,6 +158,22 @@ class ToolContext:
             return _file_has_fingerprint(resolved, recorded)
         except (OSError, ValueError, RuntimeError):
             return False
+
+    def read_if_unchanged(self, path: Path) -> bytes | None:
+        """The exact recorded bytes, read in the same pass that verifies them, if
+        ``path`` still holds them; otherwise None. b"" is a valid result.
+
+        Fails closed exactly like was_file_read_and_unchanged. A mutation must be built
+        from these bytes and never from a second read of the file.
+        """
+        try:
+            resolved = path.resolve()
+            recorded = self.read_file_fingerprints.get(resolved)
+            if recorded is None:
+                return None
+            return _verified_bytes(resolved, recorded, keep=True)
+        except (OSError, ValueError, RuntimeError):
+            return None
 
     def ensure_allowed_path(self, path: str | Path) -> Path:
         p = Path(path).expanduser() if isinstance(path, str) else path.expanduser()

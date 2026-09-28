@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 from typing import Any
 
+from ..compare_write import write_if_unchanged
 from ..context import ToolContext
 from ..errors import ToolInputError, ToolPermissionError
 from ..permission_handler import PermissionResult
@@ -12,6 +13,9 @@ from ..permissions import protected_write_reason, sensitive_path_permission
 from ..protocol import ToolResult
 from ..diff_utils import unified_diff_hunks
 from ..registry import ToolSpec
+from .read import _decode_like_read_text
+
+_REFUSE_OVERWRITE = "refusing to overwrite: file must be read first and unchanged since last read"
 
 
 class FileWriteTool:
@@ -71,17 +75,22 @@ class FileWriteTool:
 
         path = context.ensure_allowed_path(file_path)
 
+        verified: bytes | None = None
         original_file: str | None = None
         if path.exists():
-            if not context.was_file_read_and_unchanged(path):
-                raise ToolInputError("refusing to overwrite: file must be read first and unchanged since last read")
-            original_file = path.read_text(encoding="utf-8", errors="replace")
+            verified = context.read_if_unchanged(path)
+            if verified is None:
+                raise ToolInputError(_REFUSE_OVERWRITE)
+            original_file = _decode_like_read_text(verified)
 
         # Encoded before anything is touched: exactly the bytes a text-mode UTF-8 write
         # produces (newline translation included), written and fingerprinted as one buffer.
         data = content.replace("\n", os.linesep).encode("utf-8")
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(data)
+        if verified is None:
+            path.parent.mkdir(parents=True, exist_ok=True)
+        # Replaces only the exact verified bytes; creates only where nothing exists.
+        if not write_if_unchanged(path, data, expected=verified):
+            raise ToolInputError(_REFUSE_OVERWRITE)
         context.mark_file_read(path, data=data)
         before_lines = (original_file or "").splitlines(keepends=True)
         after_lines = content.splitlines(keepends=True)

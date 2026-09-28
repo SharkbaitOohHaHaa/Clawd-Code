@@ -4,6 +4,7 @@ import difflib
 import os
 from typing import Any
 
+from ..compare_write import write_if_unchanged
 from ..context import ToolContext
 from ..errors import ToolInputError, ToolPermissionError
 from ..permission_handler import PermissionResult
@@ -11,6 +12,9 @@ from ..permissions import protected_write_reason, sensitive_path_permission
 from ..protocol import ToolResult
 from ..diff_utils import unified_diff_hunks
 from ..registry import ToolSpec
+from .read import _decode_like_read_text
+
+_REFUSE_EDIT = "refusing to edit: file must be read first and unchanged since last read"
 
 
 class FileEditTool:
@@ -77,10 +81,11 @@ class FileEditTool:
 
         if not path.exists():
             raise ToolInputError(f"file does not exist: {path}")
-        if not context.was_file_read_and_unchanged(path):
-            raise ToolInputError("refusing to edit: file must be read first and unchanged since last read")
+        verified = context.read_if_unchanged(path)
+        if verified is None:
+            raise ToolInputError(_REFUSE_EDIT)
 
-        original_file = path.read_text(encoding="utf-8", errors="replace")
+        original_file = _decode_like_read_text(verified)
         count = original_file.count(old)
         if count == 0:
             raise ToolInputError("old_string not found in file")
@@ -97,7 +102,8 @@ class FileEditTool:
         # Encoded before the file is touched: exactly the bytes a text-mode UTF-8 write
         # produces (newline translation included), written and fingerprinted as one buffer.
         data = updated.replace("\n", os.linesep).encode("utf-8")
-        path.write_bytes(data)
+        if not write_if_unchanged(path, data, expected=verified):
+            raise ToolInputError(_REFUSE_EDIT)
         context.mark_file_read(path, data=data)
         before_lines = original_file.splitlines(keepends=True)
         after_lines = updated.splitlines(keepends=True)
