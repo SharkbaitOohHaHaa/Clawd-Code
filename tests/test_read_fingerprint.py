@@ -18,19 +18,23 @@ import ast
 import base64
 import builtins
 import contextlib
+import errno
 import hashlib
 import io
 import json
 import os
 import pathlib
 import random
+import shutil
 import stat
+import subprocess
 import sys
 import tempfile
 import threading
 import unittest
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Iterator
+from typing import Any, Callable, Iterable, Iterator
 from unittest.mock import patch
 
 import src.tool_system.context as context_module
@@ -1489,6 +1493,623 @@ class TestFingerprintStaticGuards(unittest.TestCase):
         ]
         self.assertEqual(len(dispatch), 1)
         self.assertGreater(gated[0].lineno, dispatch[0].lineno)
+
+
+# --------------------------------------------------------------------------------------
+# Linux fs.protected_regular evidence (vector-16 evidence gate; probe branch, tests only)
+#
+# Today Write/Edit overwrite through Path.write_bytes -> open(path, "wb")
+# (O_WRONLY|O_CREAT|O_TRUNC). The planned in-place compare-and-write (not on this branch)
+# would open the existing file with open(path, "r+b") (O_RDWR, no O_CREAT). Linux
+# fs.protected_regular (fs/namei.c may_create_in_sticky) refuses only O_CREAT opens of an
+# existing regular file owned by neither the caller (fsuid) nor the directory owner, in a
+# sticky directory that is world-writable (level >= 1) or group-writable (level 2).
+# Test 1 records, on the CI kernel, whether the in-place open is allowed where today's
+# open("wb") is refused; test 2 pins that today's Write/Edit behave exactly like open("wb").
+#
+# Nothing here changes a sysctl, so the evidence covers only the level the runner reports.
+# Files and directories owned by other uids (64001, 64002; never the overflow uid) are made
+# with "sudo -n chown" inside this test's own private temporary directory, only on
+# GitHub-hosted runners or with TEST_PROTECTED_REGULAR_SUDO=1. On Linux, where evidence is
+# required (GitHub-hosted runners, or TEST_PROTECTED_REGULAR_REQUIRED=1), a missing
+# prerequisite FAILS instead of skipping. In the CI evidence step (GitHub Actions with
+# TEST_PROTECTED_REGULAR_REQUIRED=1), tests 1 and 2 each emit one verdict annotation, plus
+# an error annotation for a prerequisite failure or an abort; annotations are readable
+# through the public check-runs API. Verdict -> gate: WIDENING -> STOP (warning),
+# NO_WIDENING -> CLEAR for the reported level (notice), anything else -> BLOCKED (error).
+# --------------------------------------------------------------------------------------
+_PR_SYSCTL = "/proc/sys/fs/protected_regular"
+_PR_OVERFLOWUID = "/proc/sys/kernel/overflowuid"
+_PR_SUDO_OPT_IN = "TEST_PROTECTED_REGULAR_SUDO"
+_PR_REQUIRED = "TEST_PROTECTED_REGULAR_REQUIRED"
+_PR_FOREIGN_UID = 64001  # owns the target files
+_PR_THIRD_UID = 64002  # owns some directories (the /tmp shape: neither caller nor file owner)
+_PR_ORIGINAL = b"head\nkey=old\ntail\n"
+_PR_CHANGED = b"HEAD" + _PR_ORIGINAL[4:]
+_PR_REFUSE_EDIT = "refusing to edit: file must be read first and unchanged since last read"
+_PR_REFUSE_WRITE = "refusing to overwrite: file must be read first and unchanged since last read"
+_PR_ON_LINUX = sys.platform.startswith("linux")
+_PR_GATE_KIND = {"STOP": "warning", "CLEAR": "notice", "BLOCKED": "error"}
+
+
+def _pr_github_hosted() -> bool:
+    return (
+        os.environ.get("GITHUB_ACTIONS") == "true"
+        and os.environ.get("RUNNER_ENVIRONMENT") == "github-hosted"
+    )
+
+
+def _pr_required() -> bool:
+    return _pr_github_hosted() or os.environ.get(_PR_REQUIRED) == "1"
+
+
+def _pr_sudo_allowed() -> bool:
+    return _pr_github_hosted() or os.environ.get(_PR_SUDO_OPT_IN) == "1"
+
+
+def _pr_read_proc(path: str) -> str:
+    try:
+        with open(path, "rb") as handle:
+            return handle.read(32).decode("ascii", "replace").strip()
+    except OSError as exc:
+        return f"<unreadable {type(exc).__name__} errno={exc.errno}>"
+
+
+def _pr_env_report() -> str:
+    return (
+        f"protected_regular={_pr_read_proc(_PR_SYSCTL)} "
+        f"overflowuid={_pr_read_proc(_PR_OVERFLOWUID)} "
+        f"euid={os.geteuid() if hasattr(os, 'geteuid') else None} "
+        f"kernel={os.uname().release if hasattr(os, 'uname') else None} "
+        f"image={os.environ.get('ImageOS')}/{os.environ.get('ImageVersion')} "
+        f"GITHUB_ACTIONS={os.environ.get('GITHUB_ACTIONS')} "
+        f"RUNNER_ENVIRONMENT={os.environ.get('RUNNER_ENVIRONMENT')} "
+        f"{_PR_REQUIRED}={os.environ.get(_PR_REQUIRED)} "
+        f"capture={'off' if sys.stdout is sys.__stdout__ else 'on'} "
+        f"required={_pr_required()} sudo_allowed={_pr_sudo_allowed()} "
+        f"python={sys.version.split()[0]} platform={sys.platform}"
+    )
+
+
+def _pr_escape(text: str, *, property_value: bool = False) -> str:
+    text = text.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+    return text.replace(":", "%3A").replace(",", "%2C") if property_value else text
+
+
+def _pr_annotate(kind: str, title: str, message: str) -> None:
+    """Only in the CI evidence step (GitHub Actions with TEST_PROTECTED_REGULAR_REQUIRED=1):
+    one workflow-command annotation on its own line, message bounded to 3500 characters."""
+    if os.environ.get("GITHUB_ACTIONS") != "true" or os.environ.get(_PR_REQUIRED) != "1":
+        return
+    title = f"{title} py{sys.version_info.major}.{sys.version_info.minor}"
+    print(
+        f"\n::{kind} title={_pr_escape(title, property_value=True)}::{_pr_escape(message[:3500])}",
+        flush=True,
+    )
+
+
+def _pr_require(testcase: unittest.TestCase, ok: bool, what: str) -> None:
+    """A missing prerequisite FAILS where evidence is required and skips elsewhere."""
+    if ok:
+        return
+    detail = f"{_pr_env_report()} | {what}"
+    if _pr_required():
+        _pr_annotate("error", f"protected_regular prerequisite {type(testcase).__name__}", detail)
+        testcase.fail(f"prerequisite missing where evidence is required (never skipped): {detail}")
+    raise unittest.SkipTest(detail)
+
+
+def _pr_level(testcase: unittest.TestCase) -> int:
+    text = _pr_read_proc(_PR_SYSCTL)
+    _pr_require(testcase, text in ("0", "1", "2"), f"unexpected {_PR_SYSCTL} value {text!r}")
+    return int(text)
+
+
+def _pr_kernel_refuses_o_creat(
+    level: int, dir_mode: int, dir_uid: int, file_uid: int, fsuid: int
+) -> bool:
+    """Oracle transcribed from fs/namei.c may_create_in_sticky() for an EXISTING regular
+    file opened with O_CREAT and without O_EXCL. No capability exempts the caller.
+    Test 1 checks it against the runner's kernel, at the runner's level only."""
+    if level == 0 or not dir_mode & stat.S_ISVTX:
+        return False
+    if file_uid == dir_uid or file_uid == fsuid:
+        return False
+    if dir_mode & stat.S_IWOTH:
+        return True
+    return level >= 2 and bool(dir_mode & stat.S_IWGRP)
+
+
+def _pr_run(args: list[str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        args, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60, check=False
+    )
+
+
+class _PrOwners:
+    """Gives paths inside this test's own private temporary directory to other uids and,
+    when sudo was used, the whole tree back to the caller before it is removed (root
+    needs no give-back)."""
+
+    def __init__(self, testcase: unittest.TestCase, root: Path) -> None:
+        self.root = root
+        self.euid, self.egid = os.geteuid(), os.getegid()
+        overflow = _pr_read_proc(_PR_OVERFLOWUID)
+        _pr_require(testcase, overflow.isdigit(), f"cannot read {_PR_OVERFLOWUID}: {overflow!r}")
+        foreign = {_PR_FOREIGN_UID, _PR_THIRD_UID}
+        _pr_require(
+            testcase,
+            len(foreign) == 2 and not foreign & {int(overflow), self.euid},
+            f"foreign uids {sorted(foreign)} must differ from each other, from the overflow "
+            f"uid {overflow} and from the caller {self.euid}",
+        )
+        info = os.lstat(root)
+        _pr_require(
+            testcase,
+            root.parent == Path(tempfile.gettempdir()).resolve()
+            and stat.S_ISDIR(info.st_mode)
+            and info.st_uid == self.euid
+            and stat.S_IMODE(info.st_mode) == 0o700,
+            f"ownership changes only inside a fresh private temporary directory, not {root}",
+        )
+        self.sudo_chown: list[str] | None = None
+        if self.euid == 0:
+            return  # root: os.lchown, no sudo
+        _pr_require(
+            testcase,
+            _pr_sudo_allowed(),
+            f"files owned by other uids need 'sudo -n chown': not a GitHub-hosted runner "
+            f"and {_PR_SUDO_OPT_IN}=1 is not set",
+        )
+        sudo, chown = shutil.which("sudo"), shutil.which("chown")
+        _pr_require(testcase, sudo is not None and chown is not None, "sudo and chown on PATH")
+        assert sudo is not None and chown is not None
+        probe = _pr_run([sudo, "-n", "true"])
+        _pr_require(
+            testcase,
+            probe.returncode == 0,
+            f"non-interactive sudo unavailable: rc={probe.returncode} {probe.stderr.strip()!r}",
+        )
+        self.sudo_chown = [sudo, "-n", chown]
+
+    def give(self, testcase: unittest.TestCase, uid: int, paths: list[Path]) -> None:
+        for path in paths:
+            _pr_require(
+                testcase,
+                path != self.root
+                and path.is_relative_to(self.root)
+                and not path.is_symlink()
+                and path.resolve() == path,
+                f"refusing an ownership change outside the test directory: {path}",
+            )
+        try:
+            if self.sudo_chown is None:
+                for path in paths:
+                    os.lchown(path, uid, uid)
+            else:
+                done = _pr_run([*self.sudo_chown, "-h", f"{uid}:{uid}", "--", *map(str, paths)])
+                _pr_require(
+                    testcase,
+                    done.returncode == 0,
+                    f"sudo chown to {uid} failed: rc={done.returncode} {done.stderr.strip()!r}",
+                )
+        except OSError as exc:
+            _pr_require(testcase, False, f"chown to uid {uid} failed: {exc!r}")
+        for path in paths:
+            owner = os.lstat(path).st_uid
+            _pr_require(testcase, owner == uid, f"{path} is owned by uid {owner}, not {uid}")
+
+    def take_back(self) -> str | None:
+        if self.sudo_chown is None:
+            return None  # root may delete in any sticky directory
+        done = _pr_run([*self.sudo_chown, "-R", f"{self.euid}:{self.egid}", "--", str(self.root)])
+        return None if done.returncode == 0 else f"rc={done.returncode} {done.stderr.strip()!r}"
+
+
+@dataclass(frozen=True)
+class _PrShape:
+    name: str
+    dir_mode: int
+    dir_owner: str  # "caller", "foreign" (owner of the files) or "third"
+    file_owner: str
+
+
+_PR_SHAPES = (
+    # Refused at level >= 1: sticky, world-writable, file owned by neither caller nor dir owner.
+    _PrShape("sticky1777_callerdir_foreignfile", 0o1777, "caller", "foreign"),
+    # The /tmp shape: the sticky world-writable directory belongs to a third uid.
+    _PrShape("sticky1777_thirddir_foreignfile", 0o1777, "third", "foreign"),
+    # Refused at level 2 only: sticky and group-writable, not world-writable.
+    _PrShape("sticky1770_callerdir_foreignfile", 0o1770, "caller", "foreign"),
+    # Never refused: group-writable but not sticky.
+    _PrShape("nonsticky0770_callerdir_foreignfile", 0o0770, "caller", "foreign"),
+    # Never refused: sticky but neither group- nor world-writable.
+    _PrShape("sticky1755_callerdir_foreignfile", 0o1755, "caller", "foreign"),
+    # Never refused: world-writable but not sticky.
+    _PrShape("nonsticky0777_callerdir_foreignfile", 0o0777, "caller", "foreign"),
+    # Never refused: the directory owner owns the file.
+    _PrShape("sticky1777_fileownerdir_foreignfile", 0o1777, "foreign", "foreign"),
+    # Never refused: the caller owns the file.
+    _PrShape("sticky1777_thirddir_callerfile", 0o1777, "third", "caller"),
+)
+
+
+@unittest.skipUnless(_PR_ON_LINUX, "Linux fs.protected_regular (fs/namei.c may_create_in_sticky)")
+class _ProtectedRegularBase(unittest.TestCase):
+    def setUp(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name).resolve()
+        self.owners = _PrOwners(self, self.root)
+        self.addCleanup(self._take_back)  # LIFO: runs before temporary.cleanup
+
+    def _take_back(self) -> None:
+        problem = self.owners.take_back()
+        if problem is not None:
+            self.fail(f"could not return {self.root} to uid {self.owners.euid}: {problem}")
+
+    def _uid(self, who: str) -> int:
+        return {"caller": self.owners.euid, "foreign": _PR_FOREIGN_UID, "third": _PR_THIRD_UID}[who]
+
+    def build(
+        self,
+        shape: _PrShape,
+        names: Iterable[str],
+        prepare: Callable[[dict[str, Path]], None] | None = None,
+    ) -> tuple[dict[str, Path], str, bool]:
+        """Files (0666, bytes _PR_ORIGINAL) in a directory of the shape's mode and owners.
+        ``prepare`` runs while the caller still owns everything. Returns the files, a fact
+        line, and whether the oracle says O_CREAT opens are refused at the runner's level."""
+        folder = self.root / shape.name
+        folder.mkdir()
+        files: dict[str, Path] = {}
+        for name in names:
+            path = folder / f"{name}.txt"
+            path.write_bytes(_PR_ORIGINAL)
+            os.chmod(path, 0o666)
+            files[name] = path
+        if prepare is not None:
+            prepare(files)
+        os.chmod(folder, shape.dir_mode)
+        file_uid, dir_uid = self._uid(shape.file_owner), self._uid(shape.dir_owner)
+        if shape.file_owner != "caller":
+            self.owners.give(self, file_uid, list(files.values()))
+        if shape.dir_owner != "caller":
+            self.owners.give(self, dir_uid, [folder])
+        info = os.stat(folder)
+        file_uids = {os.stat(path).st_uid for path in files.values()}
+        file_modes = {stat.S_IMODE(os.stat(path).st_mode) for path in files.values()}
+        _pr_require(
+            self,
+            stat.S_IMODE(info.st_mode) == shape.dir_mode
+            and info.st_uid == dir_uid
+            and file_uids == {file_uid}
+            and file_modes == {0o666},
+            f"fixture {shape.name}: dir mode {oct(stat.S_IMODE(info.st_mode))} uid {info.st_uid}, "
+            f"file uids {sorted(file_uids)} modes {sorted(map(oct, file_modes))}",
+        )
+        refuses = _pr_kernel_refuses_o_creat(
+            _pr_level(self), info.st_mode, info.st_uid, file_uid, self.owners.euid
+        )
+        facts = f"dir {oct(stat.S_IMODE(info.st_mode))} uid {dir_uid} file uid {file_uid}"
+        return files, facts, refuses
+
+
+# The probes, on sacrificial files: today's open("wb"), O_CREAT alone, the planned in-place
+# opens (open("r+b"), and os.open with O_RDWR|O_CLOEXEC|O_NONBLOCK|O_NOCTTY, the flags the
+# planned opener adds; no implementation on this branch), and O_TRUNC without O_CREAT.
+_PR_PROBES: dict[str, Callable[[Path], Any]] = {
+    "wb": lambda p: open(p, "wb"),
+    "creat": lambda p: os.open(p, os.O_WRONLY | os.O_CREAT | os.O_CLOEXEC, 0o666),
+    "rplusb": lambda p: open(p, "r+b"),
+    "rdwr_nb": lambda p: os.open(p, os.O_RDWR | os.O_CLOEXEC | os.O_NONBLOCK | os.O_NOCTTY),
+    "trunc": lambda p: os.open(p, os.O_WRONLY | os.O_TRUNC | os.O_CLOEXEC),
+}
+_PR_O_CREAT = frozenset({"wb", "creat"})
+_PR_IN_PLACE = ("rplusb", "rdwr_nb")
+_PR_TRUNCATING = frozenset({"wb", "trunc"})
+
+
+def _pr_attempt(open_it: Callable[[Path], Any], path: Path) -> str:
+    try:
+        opened = open_it(path)
+    except OSError as exc:
+        return f"refused:{type(exc).__name__}:{exc.errno}"
+    if isinstance(opened, int):
+        os.close(opened)
+    else:
+        opened.close()
+    return "opened"
+
+
+def _pr_short(outcome: str) -> str:
+    """Compact form for the annotation: R<errno>/<size> refused, O/<size> opened."""
+    return outcome.replace("refused:PermissionError:", "R").replace("opened", "O")
+
+
+def _pr_kernel_verdict(
+    level: int, observed: dict[str, dict[str, str]], matches: bool
+) -> tuple[str, str, list[str]]:
+    """Sol's outcome rule, from the raw observations on validated fixtures:
+    open("wb") refused where an in-place open is allowed -> WIDENING (STOP); no refusal at
+    all (level 0) -> cannot prove anything (BLOCKED); refusals but every in-place open also
+    refused and the oracle matched -> NO_WIDENING (CLEAR); anything else -> BLOCKED.
+    Returns (verdict, gate, widening shapes)."""
+    refused_wb = [n for n, row in observed.items() if row["wb"].startswith("refused")]
+    widening = [
+        n for n in refused_wb if any(observed[n][p].startswith("opened") for p in _PR_IN_PLACE)
+    ]
+    if widening:
+        return "WIDENING", "STOP", widening
+    if level == 0 or not refused_wb:
+        return "INCONCLUSIVE_NO_REFUSAL", "BLOCKED", widening
+    if not matches:
+        return "NO_WIDENING_ORACLE_MISMATCH", "BLOCKED", widening
+    return "NO_WIDENING", "CLEAR", widening
+
+
+class TestProtectedRegularKernelEvidence(_ProtectedRegularBase):
+    """Test 1: raw opens only. Is an in-place open allowed where today's open('wb') is
+    refused? The annotation carries the verdict and gate (WIDENING -> STOP). The test
+    fails on invalid evidence (fixture, level 0 where required, the kernel disagreeing
+    with the transcribed rule) or a failed ownership give-back, not on WIDENING."""
+
+    def test_o_creat_open_vs_in_place_open_of_another_users_file(self) -> None:
+        title = "protected_regular kernel evidence"
+        observed: dict[str, dict[str, str]] = {}
+        expected: dict[str, dict[str, str]] = {}
+        facts: dict[str, str] = {}
+        try:
+            level = _pr_level(self)
+            for shape in _PR_SHAPES:
+                files, facts[shape.name], refuses = self.build(shape, _PR_PROBES)
+                observed[shape.name], expected[shape.name] = {}, {}
+                for probe, open_it in _PR_PROBES.items():
+                    outcome = _pr_attempt(open_it, files[probe])
+                    observed[shape.name][probe] = f"{outcome}/{len(files[probe].read_bytes())}"
+                    if probe in _PR_O_CREAT and refuses:
+                        want = f"refused:PermissionError:{errno.EACCES}/{len(_PR_ORIGINAL)}"
+                    else:
+                        want = f"opened/{0 if probe in _PR_TRUNCATING else len(_PR_ORIGINAL)}"
+                    expected[shape.name][probe] = want
+        except unittest.SkipTest:
+            raise
+        except BaseException as exc:
+            _pr_annotate("error", f"{title} ABORTED", f"{_pr_env_report()} | {exc!r} | partial={observed}")
+            raise
+        matches = observed == expected
+        verdict, gate, widening = _pr_kernel_verdict(level, observed, matches)
+        mismatches = [
+            f"{s}.{p}: got {_pr_short(observed[s][p])} want {_pr_short(expected[s][p])}"
+            for s in observed
+            for p in observed[s]
+            if observed[s][p] != expected[s][p]
+        ]
+        report = (
+            f"verdict={verdict} gate={gate} oracle={'MATCH' if matches else 'MISMATCH'} "
+            f"level={level} widening_shapes={widening} | {_pr_env_report()} | "
+            f"mismatches={mismatches} | "
+            + " ; ".join(
+                f"{name} [{facts[name]}]: " + " ".join(f"{p}={_pr_short(v)}" for p, v in row.items())
+                for name, row in observed.items()
+            )
+        )
+        _pr_annotate(_PR_GATE_KIND[gate], f"{title} {verdict} gate {gate}", report)
+        self.assertEqual(observed, expected, report)
+        if _pr_required():
+            self.assertIn(level, (1, 2), f"level 0 cannot prove or disprove the widening | {report}")
+
+
+def _pr_error_fields(exc: BaseException | None) -> tuple[Any, ...] | None:
+    if exc is None:
+        return None
+    return (
+        type(exc),
+        exc.args,
+        getattr(exc, "errno", None),
+        getattr(exc, "strerror", None),
+        getattr(exc, "filename", None),
+        getattr(exc, "filename2", None),
+        getattr(exc, "winerror", None),
+        str(exc),
+        exc.__cause__ is None,
+        exc.__context__ is None,
+        exc.__suppress_context__,
+        getattr(exc, "__notes__", None),
+    )
+
+
+def _pr_open_wb_error(path: Path) -> OSError | None:
+    """What today's write path (open(path, 'wb')) raises on ``path``, or None."""
+    try:
+        open(path, "wb").close()
+    except OSError as exc:
+        return exc
+    return None
+
+
+def _pr_rebuilt(reference: OSError, path: Path) -> OSError:
+    return type(reference)(reference.errno, reference.strerror, str(path))
+
+
+def _pr_run_tool(ctx: ToolContext, run: Callable[[], Any], target: Path) -> dict[str, Any]:
+    before = dict(ctx.read_file_fingerprints)
+    raised: BaseException | None = None
+    try:
+        run()
+    except Exception as exc:  # compared field by field against open('wb')
+        raised = exc
+    return {
+        "raised": raised,
+        "bytes": target.read_bytes(),
+        "marked": ctx.read_file_fingerprints != before,
+        "gate": ctx.was_file_read_and_unchanged(target),
+    }
+
+
+def _pr_parity_problems(
+    tool: str,
+    result: dict[str, Any],
+    reference: OSError | None,
+    reference_path: Path,
+    target: Path,
+    written: bytes,
+) -> list[str]:
+    """Empty when ``tool`` behaved exactly like open('wb') did on the reference file."""
+    raised = result["raised"]
+    if reference is None:
+        problems = [] if raised is None else [f"NARROWING: {tool} raised {_pr_error_fields(raised)}"]
+        if result["bytes"] != written:
+            problems.append(f"{tool} wrote {result['bytes']!r}, expected {written!r}")
+        if not result["gate"]:
+            problems.append(f"{tool}: gate False after a successful write")
+        return problems
+    problems = []
+    if _pr_error_fields(_pr_rebuilt(reference, reference_path)) != _pr_error_fields(reference):
+        problems.append(f"harness: rebuilt reference differs from {_pr_error_fields(reference)}")
+    if raised is None:
+        problems.append(f"WIDENING: {tool} succeeded where open('wb') raised {_pr_error_fields(reference)}")
+    elif _pr_error_fields(raised) != _pr_error_fields(_pr_rebuilt(reference, target)):
+        problems.append(f"{tool} raised {_pr_error_fields(raised)}")
+    if result["bytes"] != _PR_ORIGINAL:
+        problems.append(f"{tool}: file touched: {result['bytes']!r}")
+    if result["marked"]:
+        problems.append(f"{tool}: fingerprints changed after a refused write")
+    if not result["gate"]:
+        problems.append(f"{tool}: gate False although the file is untouched")
+    return problems
+
+
+def _pr_read_ok(testcase: unittest.TestCase, ctx: ToolContext, path: Path, facts: str) -> None:
+    result = FileReadTool().run({"file_path": str(path)}, ctx)
+    testcase.assertFalse(result.is_error, f"fixture Read failed: {result.output} | {facts}")
+    testcase.assertTrue(ctx.was_file_read_and_unchanged(path), f"fixture not recorded | {facts}")
+
+
+def _pr_write(ctx: ToolContext, path: Path) -> Callable[[], Any]:
+    return lambda: FileWriteTool().run({"file_path": str(path), "content": "written\n"}, ctx)
+
+
+def _pr_edit(ctx: ToolContext, path: Path) -> Callable[[], Any]:
+    return lambda: FileEditTool().run(
+        {"file_path": str(path), "old_string": "key=old", "new_string": "key=new"}, ctx
+    )
+
+
+_PR_WRITTEN = "written\n".replace("\n", os.linesep).encode("utf-8")
+_PR_EDITED = _PR_ORIGINAL.replace(b"key=old", b"key=new").replace(b"\n", os.linesep.encode())
+
+
+class TestProtectedRegularToolParity(_ProtectedRegularBase):
+    """Test 2: today's Write and Edit behave exactly like open('wb') on every shape, the
+    refusals are the ones the oracle predicts (EACCES), and a changed file gets the refusal
+    text first. Where evidence is required, at least one refusal must have been exercised."""
+
+    def test_write_and_edit_match_open_wb_on_every_shape(self) -> None:
+        title = "protected_regular tool parity"
+        names = ("reference", "write", "edit", "changed_write", "changed_edit")
+        rows: list[str] = []
+        outcomes: list[tuple[str, str, list[str]]] = []
+        refusals = 0
+        try:
+            for shape in _PR_SHAPES:
+                ctx = ToolContext(workspace_root=self.root)
+
+                def prepare(files: dict[str, Path], ctx: ToolContext = ctx) -> None:
+                    # Read, then change two files, while the caller still owns them.
+                    for name in names[1:]:
+                        _pr_read_ok(self, ctx, files[name], shape.name)
+                    for name in ("changed_write", "changed_edit"):
+                        files[name].write_bytes(_PR_CHANGED)
+
+                files, facts, refuses = self.build(shape, names, prepare)
+                reference = _pr_open_wb_error(files["reference"])
+                refusals += reference is not None
+                problems: list[str] = []
+                if (reference is not None) != refuses:
+                    problems.append(f"open('wb') {'refused' if reference else 'opened'}; oracle refuses={refuses}")
+                if reference is not None and reference.errno != errno.EACCES:
+                    problems.append(f"open('wb') refused with errno {reference.errno}, not EACCES")
+                for tool, run, target, written in (
+                    ("Write", _pr_write(ctx, files["write"]), files["write"], _PR_WRITTEN),
+                    ("Edit", _pr_edit(ctx, files["edit"]), files["edit"], _PR_EDITED),
+                ):
+                    result = _pr_run_tool(ctx, run, target)
+                    problems += _pr_parity_problems(
+                        tool, result, reference, files["reference"], target, written
+                    )
+                for tool, make, name, text in (
+                    ("Write", _pr_write, "changed_write", _PR_REFUSE_WRITE),
+                    ("Edit", _pr_edit, "changed_edit", _PR_REFUSE_EDIT),
+                ):
+                    result = _pr_run_tool(ctx, make(ctx, files[name]), files[name])
+                    raised = result["raised"]
+                    if not (isinstance(raised, ToolInputError) and str(raised) == text):
+                        problems.append(f"{tool} changed file: expected the refusal, got {raised!r}")
+                    if result["bytes"] != _PR_CHANGED or result["marked"] or result["gate"]:
+                        problems.append(
+                            f"{tool} changed file: bytes {result['bytes']!r} "
+                            f"marked={result['marked']} gate={result['gate']}"
+                        )
+                ref = "none" if reference is None else f"{type(reference).__name__}:{reference.errno}"
+                detail = "; ".join(problems)[:300] or "none"
+                rows.append(f"{shape.name} [{facts}]: open_wb={ref} problems={detail}")
+                outcomes.append((shape.name, facts, problems))
+        except unittest.SkipTest:
+            raise
+        except BaseException as exc:
+            _pr_annotate("error", f"{title} ABORTED", f"{_pr_env_report()} | {exc!r} | partial={rows}")
+            raise
+        clean = all(not problems for _, _, problems in outcomes)
+        if not clean:
+            verdict, gate = "PARITY_MISMATCH", "BLOCKED"
+        elif refusals == 0 and _pr_required():
+            verdict, gate = "INCONCLUSIVE_NO_REFUSAL", "BLOCKED"
+        else:
+            verdict, gate = "PARITY", "CLEAR"
+        report = (
+            f"verdict={verdict} gate={gate} refusals_exercised={refusals} | {_pr_env_report()} | "
+            + " ; ".join(rows)
+        )
+        _pr_annotate(_PR_GATE_KIND[gate], f"{title} {verdict} refusals {refusals}", report)
+        for name, facts, problems in outcomes:
+            with self.subTest(shape=name):
+                self.assertEqual(problems, [], f"{facts} | {report}")
+        self.assertTrue(clean, report)  # the parent fails too, not only SUBFAILED lines
+        if _pr_required():
+            self.assertGreaterEqual(refusals, 1, f"no refusal was exercised | {report}")
+
+
+class TestReadOnlyParityControl(unittest.TestCase):
+    """Harness control on every platform, no privileges: on a read-only file, Write and
+    Edit raise exactly what open('wb') raises, untouched and unmarked."""
+
+    def test_read_only_file_matches_open_wb(self) -> None:
+        if hasattr(os, "geteuid") and os.geteuid() == 0:
+            self.skipTest("root ignores file permission bits")
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name).resolve()
+        ctx = ToolContext(workspace_root=root)
+        paths = {name: root / f"{name}.txt" for name in ("reference", "write", "edit")}
+        for path in paths.values():
+            path.write_bytes(_PR_ORIGINAL)
+        for name in ("write", "edit"):
+            _pr_read_ok(self, ctx, paths[name], "read-only control")
+        for path in paths.values():
+            os.chmod(path, stat.S_IREAD)
+            self.addCleanup(os.chmod, path, stat.S_IREAD | stat.S_IWRITE)
+        reference = _pr_open_wb_error(paths["reference"])
+        self.assertIsNotNone(reference, "precondition: open('wb') of a read-only file is refused")
+        for tool, run, target, written in (
+            ("Write", _pr_write(ctx, paths["write"]), paths["write"], _PR_WRITTEN),
+            ("Edit", _pr_edit(ctx, paths["edit"]), paths["edit"], _PR_EDITED),
+        ):
+            result = _pr_run_tool(ctx, run, target)
+            self.assertEqual(
+                _pr_parity_problems(tool, result, reference, paths["reference"], target, written),
+                [],
+            )
 
 
 if __name__ == "__main__":

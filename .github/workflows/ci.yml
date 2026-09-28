@@ -53,6 +53,12 @@ jobs:
       - name: Mypy gradual-typing gate
         run: uv run --locked mypy
 
+      - name: Linux fs.protected_regular evidence (probe branch)
+        if: ${{ !cancelled() }}
+        env:
+          TEST_PROTECTED_REGULAR_REQUIRED: "1"
+        run: uv run --locked pytest tests/test_read_fingerprint.py -k "ProtectedRegular or ReadOnlyParityControl" -v -rA -s
+
   updater-windows:
     name: Windows updater
     runs-on: windows-latest
