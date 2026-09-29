@@ -94,8 +94,25 @@ def _protected_regular_refusal(dir_mode: int, dir_uid: int, file_uid: int) -> st
     file opened with O_CREAT, as today's open(path, "wb") opens it. None: that open would
     pass this check. _DENIED: the rule refuses it. Anything else says why it cannot be
     classified here; the caller then refuses (fails closed). /proc is read only for a
-    sticky directory that is group- or world-writable."""
+    sticky directory that is group- or world-writable.
+
+    The kernel's ownership exemptions come first because they hold at every level: a file
+    owned by the directory's owner or by the caller's filesystem uid is never refused, so
+    fs.protected_regular is not read for it. A uid shown as the overflow uid may be an
+    unmapped owner, so it never proves a match, and without the overflow uid no match is
+    trusted. Callers pass the owners of the directory handle and of the file actually
+    opened (or, before the open, of the file found there: a check that can only refuse)."""
     if not dir_mode & stat.S_ISVTX or not dir_mode & (stat.S_IWOTH | stat.S_IWGRP):
+        return None
+    try:
+        overflow_uid: int | None = _read_proc_int(_OVERFLOW_UID)
+    except (OSError, ValueError):
+        overflow_uid = None
+    try:
+        fsuid: int | None = _read_fsuid()
+    except (OSError, ValueError):
+        fsuid = None
+    if overflow_uid is not None and file_uid != overflow_uid and file_uid in (dir_uid, fsuid):
         return None
     try:
         level = _read_proc_int(_PROTECTED_REGULAR)
@@ -105,15 +122,10 @@ def _protected_regular_refusal(dir_mode: int, dir_uid: int, file_uid: int) -> st
         return f"fs.protected_regular={level} is not understood"
     if level == 0 or not (dir_mode & stat.S_IWOTH or level == 2):
         return None
-    try:
-        overflow_uid = _read_proc_int(_OVERFLOW_UID)
-        fsuid = _read_fsuid()
-    except (OSError, ValueError) as exc:
-        return f"the owners could not be classified: {type(exc).__name__}"
-    if overflow_uid in (dir_uid, file_uid):
+    if overflow_uid is None or fsuid is None:
+        return "the owners could not be classified (overflow uid or filesystem uid unreadable)"
+    if file_uid == overflow_uid and overflow_uid in (dir_uid, fsuid):
         return "an owner is unmapped (overflow uid)"
-    if file_uid in (dir_uid, fsuid):
-        return None
     return _DENIED
 
 
@@ -144,8 +156,9 @@ def _open_in(parent: int, path: Path, flags: int) -> int:
         raise failure  # raised outside the handler: no implicit exception chaining
     if not stat.S_ISREG(found.st_mode):
         raise _NotTheVerifiedFile()
-    # Before the open: for an existing regular file the kernel checks this rule before
-    # the other open errors (read-only file system, immutable file, permissions).
+    # Before the open, only to keep today's error precedence (for an existing regular file
+    # the kernel checks this rule before the other open errors): it can only refuse. The
+    # decision to allow is taken below, on the file actually opened.
     _enforce_protected_regular(path, os.fstat(parent), found.st_uid)
     try:
         fd = os.open(path.name, flags | _NON_BLOCKING_OPEN_FLAGS | _O_NOFOLLOW, dir_fd=parent)
@@ -154,7 +167,8 @@ def _open_in(parent: int, path: Path, flags: int) -> int:
     if failure is not None:
         raise failure
     try:
-        # Again on the file actually opened: a replacement cannot slip past the check.
+        # On the file actually opened and the directory handle: this decides, so a
+        # replacement cannot slip past the check.
         opened = os.fstat(fd)
         if not stat.S_ISREG(opened.st_mode):
             raise _NotTheVerifiedFile()

@@ -2682,14 +2682,24 @@ class TestProtectedRegularPolicy(unittest.TestCase):
                 )
                 self.assertIsNone(decision)
                 self.assertEqual(reads, [])
+        # The kernel's ownership exemptions hold at every level: fs.protected_regular is
+        # never read for a file owned by the directory's owner or by the caller.
+        for label, (dir_uid, file_uid) in {
+            "directory_owner_owns_the_file": (self.DIR_OWNER, self.DIR_OWNER),
+            "caller_owns_the_file": (self.DIR_OWNER, self.CALLER),
+        }.items():
+            with self.subTest(exempt=label):
+                reads = []
+                self.assertIsNone(self.decide(0o1777, dir_uid, file_uid, level=broken, reads=reads))
+                self.assertEqual(reads, [compare_write_module._OVERFLOW_UID, "fsuid"])
         for level, mode in (("0", 0o1777), ("1", 0o1770)):
             with self.subTest(level=level, mode=oct(mode)):
                 reads = []
-                decision = self.decide(
-                    mode, self.CALLER, self.FILE_OWNER, level=level, overflow=broken, fsuid=broken, reads=reads
-                )
+                decision = self.decide(mode, self.CALLER, self.FILE_OWNER, level=level, reads=reads)
                 self.assertIsNone(decision)
-                self.assertEqual(reads, [compare_write_module._PROTECTED_REGULAR])
+                self.assertEqual(
+                    reads, [compare_write_module._OVERFLOW_UID, "fsuid", compare_write_module._PROTECTED_REGULAR]
+                )
 
     def test_what_cannot_be_classified_fails_closed(self) -> None:
         refusable = (0o1777, self.CALLER, self.FILE_OWNER)
@@ -2706,16 +2716,27 @@ class TestProtectedRegularPolicy(unittest.TestCase):
                 decision = self.decide(*refusable, **override)
                 self.assertIsNotNone(decision)
                 self.assertNotEqual(decision, compare_write_module._DENIED)
-        for label, (dir_uid, file_uid) in {
-            "file_owner_unmapped": (self.CALLER, self.OVERFLOW),
-            "dir_owner_unmapped": (self.OVERFLOW, self.FILE_OWNER),
-            "both_unmapped": (self.OVERFLOW, self.OVERFLOW),
+        # A uid shown as the overflow uid may be unmapped: it never proves a match. Only a
+        # match that is possible but unprovable is unclassifiable; otherwise the kernel's
+        # answer is known (another user's file in a world-writable sticky directory: denied).
+        for label, (dir_uid, file_uid, fsuid, want) in {
+            "file_owner_unmapped": (self.CALLER, self.OVERFLOW, self.CALLER, compare_write_module._DENIED),
+            "dir_owner_unmapped": (self.OVERFLOW, self.FILE_OWNER, self.CALLER, compare_write_module._DENIED),
+            "both_unmapped": (self.OVERFLOW, self.OVERFLOW, self.CALLER, "an owner is unmapped (overflow uid)"),
+            "caller_is_the_overflow_uid": (self.CALLER, self.OVERFLOW, self.OVERFLOW, "an owner is unmapped (overflow uid)"),
+            "callers_file_in_an_unmapped_directory": (self.OVERFLOW, self.CALLER, self.CALLER, None),
         }.items():
             with self.subTest(case=label):
-                self.assertEqual(self.decide(0o1777, dir_uid, file_uid), "an owner is unmapped (overflow uid)")
-        # Pinned as ruled ("unreadable policy -> fail closed"): even a file the caller owns
-        # is refused when the level cannot be read, although the kernel would allow it.
-        self.assertIsNotNone(self.decide(0o1777, self.DIR_OWNER, self.CALLER, level=FileNotFoundError(2, "absent")))
+                self.assertEqual(self.decide(0o1777, dir_uid, file_uid, fsuid=fsuid), want)
+        # The exemptions need no fs.protected_regular (Sol): the caller's own file, or the
+        # directory owner's, is allowed although the level cannot be read ...
+        absent = FileNotFoundError(errno.ENOENT, "absent")
+        self.assertIsNone(self.decide(0o1777, self.DIR_OWNER, self.CALLER, level=absent))
+        self.assertIsNone(self.decide(0o1777, self.DIR_OWNER, self.DIR_OWNER, level=absent))
+        # ... but only when the overflow uid is known, so an unmapped owner cannot pose as one.
+        unreadable = OSError(errno.EIO, "I/O")
+        self.assertIsNotNone(self.decide(0o1777, self.DIR_OWNER, self.CALLER, overflow=unreadable))
+        self.assertIsNotNone(self.decide(0o1777, self.DIR_OWNER, self.CALLER, overflow=unreadable, level=absent))
         # The kernel compares the filesystem uid, not the effective uid.
         self.assertIsNone(self.decide(0o1777, self.CALLER, 4242, fsuid=4242))
         self.assertEqual(self.decide(0o1777, self.DIR_OWNER, 1001, fsuid=4242), compare_write_module._DENIED)
